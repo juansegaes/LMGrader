@@ -1,0 +1,40 @@
+[project]
+name = "lmgrader"
+version = "0.2.0"
+description = "FOSS local alternative to Gradescope for grading physical test templates"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+    "Pillow>=10.0",
+    "matplotlib>=3.7",   # mathtext: LaTeX formulas in feedback PDFs
+    "openai>=1.0",
+    "pandas>=2.0",
+    "rapidfuzz>=3.0",
+    "pypdfium2>=4.0",
+    "pytwain>=2.0; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+lmgrader = "lmgrader.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lmgrader = ["ui/assets/*.svg", "assets/answer_key_skill/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+norecursedirs = ["leftover_runs", "screenshots", "_last_run", "scratch"]

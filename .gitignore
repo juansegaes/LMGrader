@@ -1,0 +1,26 @@
+﻿# real student data - never commit
+tests/fixtures/private/
+/*_roster.csv
+/grades*.csv
+/silly_names.csv
+/tabertcaelan.pdf
+/*.lmgrader.json
+
+# test output and scratch files (the test_*.py suite itself stays tracked)
+tests/_last_run/
+tests/leftover_runs/
+tests/screenshots/
+tests/scratch/
+.pytest_cache/
+
+# Python build / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# logs
+*.log
