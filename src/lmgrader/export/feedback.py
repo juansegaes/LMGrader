@@ -399,16 +399,18 @@ def save_pdf(pages: List[Image.Image], out_path: str):
 
 def export_submission_pdf(sub: Submission, out_path: str, summary: bool = True) -> str:
     template = load_template(sub.template_id) if sub.template_id else None
-    student = next((s for s in list_students() if s.id == sub.student_id), None)
+    student = next((s for s in list_students(all_courses=True) if s.id == sub.student_id), None)
     save_pdf(render_feedback_pages(sub, template, list_grades(sub.id), student, summary), out_path)
     return out_path
 
 def export_exam(exam_name: str, out_dir: str, summary: bool = True, only_graded: bool = True,
-                progress: Callable[[int, int, str], None] = None) -> List[Tuple[Optional[Student], str]]:
-    """Write one feedback PDF per submission of the exam plus index.csv (for LMS upload / mail merge)."""
+                progress: Callable[[int, int, str], None] = None,
+                course_id: int = None) -> List[Tuple[Optional[Student], str]]:
+    """Write one feedback PDF per submission of the exam (of the current course, or course_id)
+    plus index.csv (for LMS upload / mail merge)."""
     os.makedirs(out_dir, exist_ok=True)
-    templates = {t.id: t for t in list_versions(exam_name)}
-    students = {s.id: s for s in list_students()}
+    templates = {t.id: t for t in list_versions(exam_name, course_id)}
+    students = {s.id: s for s in list_students(all_courses=True)}
     subs = [s for s in list_submissions(template_ids=list(templates))
             if not only_graded or s.status == SUB_GRADED]
     results, used = [], set()

@@ -9,19 +9,29 @@ Calls made by the app:
 The question text and rubric are stored on the template, so grading never
 re-derives them and every student is graded against the same text.
 """
+import contextlib
 import json
 import re
 import threading
 import time
 from typing import Tuple
 from openai import OpenAI
-from ..config import DEFAULT_LLM_BASE_URL, DEFAULT_LLM_API_KEY, LLM_CONFIG, clamp_strictness
+from ..config import (DEFAULT_LLM_BASE_URL, DEFAULT_LLM_API_KEY, LLM_CONFIG, clamp_strictness,
+                      OPENROUTER_BASE_URL, openrouter_api_key, llm_enabled)
+
+
+class LLMDisabled(RuntimeError):
+    """Settings → "Use an LLM" is off: no LLM client is created."""
+    def __init__(self):
+        super().__init__("The LLM is turned off in Settings (“Use an LLM”).")
 
 # A failed request is retried until it has failed RETRY_FAILURES times within RETRY_WINDOW_S
 # seconds; RETRY_WAIT_S between attempts so a down server gives up quickly instead of hammering.
 RETRY_FAILURES = 3
 RETRY_WINDOW_S = 60.0
 RETRY_WAIT_S = 3.0
+# Max seconds the AI gets for one problem; on expiry the grade becomes an 'llm_error' (human review).
+GRADE_TIMEOUT_S = 60.0
 
 # Grading strictness (per exam, 5..10): the middle paragraph of the grader's system prompt.
 # 10 is the original wording, so exams that never changed the level grade as before.
@@ -370,15 +380,17 @@ def _degenerate_grade(text: str) -> bool:
 def run_grading(llm, messages, schema, max_points: float) -> dict:
     """Grading request; a looping or cut-off reply is asked again once with a strict note. If it
     loops again, _parse keeps what is usable (score, text up to the repetition) and flags it."""
-    text = llm._chat(messages, schema, "grade")
-    if _degenerate_grade(text):
-        retry = [dict(m) for m in messages]
-        content = list(retry[-1]["content"])
-        content[0] = {"type": "text", "text": content[0]["text"] + LOOP_RETRY_NOTE}
-        retry[-1]["content"] = content
-        again = llm._chat(retry, schema, "grade")
-        if not _degenerate_grade(again) or _extract_json(text) is None:
-            text = again
+    budget = getattr(llm, "time_budget", None)
+    with (budget(GRADE_TIMEOUT_S) if budget else contextlib.nullcontext()):   # whole problem (retries included); expiry -> TimeoutError
+        text = llm._chat(messages, schema, "grade")
+        if _degenerate_grade(text):
+            retry = [dict(m) for m in messages]
+            content = list(retry[-1]["content"])
+            content[0] = {"type": "text", "text": content[0]["text"] + LOOP_RETRY_NOTE}
+            retry[-1]["content"] = content
+            again = llm._chat(retry, schema, "grade")
+            if not _degenerate_grade(again) or _extract_json(text) is None:
+                text = again
     return llm._parse(text, max_points)
 
 def _salvage_grade_json(text: str):
@@ -410,6 +422,8 @@ def _image_part(image_b64: str, mime="image/png") -> dict:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}}
 
 class LLMClient:
+    _deadline = None     # monotonic time the current time_budget ends
+
     def __init__(self, base_url=DEFAULT_LLM_BASE_URL, api_key=DEFAULT_LLM_API_KEY, model=None,
                  max_tokens=2048, temperature=0.1):
         self.base_url = base_url
@@ -417,14 +431,52 @@ class LLMClient:
         self.model = model or "local-model"
         self.max_tokens = int(max_tokens)
         self.temperature = float(temperature)
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0)  # retries: _chat
         self._schema_supported = True
         self._aborted = threading.Event()
 
+    @contextlib.contextmanager
+    def time_budget(self, seconds: float):
+        """Everything requested inside (retries too) must finish within `seconds`, else TimeoutError."""
+        prev, self._deadline = self._deadline, time.monotonic() + seconds
+        try:
+            yield
+        finally:
+            self._deadline = prev
+
+    def _remaining(self):
+        if self._deadline is None:
+            return None
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the AI took too long on this problem")
+        return left
+
     @classmethod
     def from_config(cls) -> "LLMClient":
+        if not llm_enabled():
+            raise LLMDisabled()
         return cls(base_url=LLM_CONFIG["base_url"], api_key=LLM_CONFIG["api_key"],
                    model=LLM_CONFIG["model"], max_tokens=LLM_CONFIG.get("max_tokens", 2048),
+                   temperature=LLM_CONFIG.get("temperature", 0.1))
+
+    @classmethod
+    def for_grading(cls) -> "LLMClient":
+        """Client used to grade answers: the local server, or OpenRouter when selected in Settings
+        (key from OPENROUTER_API_KEY in the environment / .env). Name reading etc. use from_config().
+        While config.OPENROUTER_ENABLED is False it is always the local server."""
+        from .. import config
+        if not llm_enabled():
+            raise LLMDisabled()
+        if not config.OPENROUTER_ENABLED or LLM_CONFIG.get("grading_provider") != "openrouter":
+            return cls.from_config()
+        key = openrouter_api_key()
+        if not key:
+            raise RuntimeError("OpenRouter grading is selected but OPENROUTER_API_KEY was not found "
+                               "(set it in a .env file or the environment).")
+        return cls(base_url=OPENROUTER_BASE_URL, api_key=key,
+                   model=LLM_CONFIG.get("openrouter_model") or "qwen/qwen3-vl-8b-instruct",
+                   max_tokens=LLM_CONFIG.get("max_tokens", 2048),
                    temperature=LLM_CONFIG.get("temperature", 0.1))
 
     def set_model(self, model):
@@ -441,6 +493,15 @@ class LLMClient:
         except Exception:
             return []
 
+    def reachable(self, timeout: float = 3.0) -> bool:
+        """Quick check that the server answers at all (no retries), e.g. before asking it about
+        every test of a batch."""
+        try:
+            self._client.with_options(timeout=timeout).models.list()
+            return True
+        except Exception:
+            return False
+
     # ---- low level ----
     def _chat(self, messages, schema=None, schema_name="response", max_tokens=None, temperature=None) -> str:
         """One request, retried on errors until it fails RETRY_FAILURES times within RETRY_WINDOW_S
@@ -448,10 +509,13 @@ class LLMClient:
         failures = []
         while True:
             try:
+                self._remaining()
                 return self._chat_once(messages, schema, schema_name, max_tokens, temperature)
-            except Exception:
+            except Exception as e:
                 if self._aborted.is_set():
                     raise
+                if self._deadline is not None and time.monotonic() >= self._deadline:
+                    raise TimeoutError("the AI took too long on this problem") from e
                 now = time.monotonic()
                 failures = [t for t in failures if now - t < RETRY_WINDOW_S] + [now]
                 if len(failures) >= RETRY_FAILURES:
@@ -459,13 +523,37 @@ class LLMClient:
                 if self._aborted.wait(RETRY_WAIT_S):
                     raise
 
+    def _create(self, **kwargs):
+        """The HTTP call. Under a time_budget it runs in a helper thread so the budget is wall-clock:
+        the SDK's timeout only limits the gap between bytes, and keep-alive bytes would reset it."""
+        create = self._client.chat.completions.create
+        left = self._remaining()
+        if left is None:
+            return create(**kwargs)
+        box = {}
+        def call():
+            try:
+                box["reply"] = create(timeout=left, **kwargs)
+            except Exception as e:
+                box["error"] = e
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        while t.is_alive():
+            if self._aborted.is_set():
+                raise RuntimeError("stopped")
+            self._remaining()     # raises TimeoutError once the budget is spent
+            t.join(0.1)
+        if "error" in box:
+            raise box["error"]
+        return box["reply"]
+
     def _chat_once(self, messages, schema=None, schema_name="response", max_tokens=None, temperature=None) -> str:
         kwargs = dict(model=self.model, messages=messages,
                       temperature=self.temperature if temperature is None else temperature,
                       max_tokens=min(self.max_tokens, max_tokens) if max_tokens else self.max_tokens)
         if schema is not None and self._schema_supported:
             try:
-                resp = self._client.chat.completions.create(
+                resp = self._create(
                     response_format={"type": "json_schema",
                                      "json_schema": {"name": schema_name, "strict": True, "schema": schema}},
                     **kwargs)
@@ -475,7 +563,7 @@ class LLMClient:
                 if "response_format" not in str(e) and "json_schema" not in str(e):
                     raise
                 self._schema_supported = False
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = self._create(**kwargs)
         return resp.choices[0].message.content or ""
 
     # ---- template setup (run once, result is stored on the template) ----
@@ -542,13 +630,19 @@ class LLMClient:
         return split_part_reply(self._transcribe(prompt, image_b64), letter)
 
     def generate_rubric(self, question_latex: str, max_points: float, problem: str = "",
-                        instructions: str = "", notes: str = "", answer_key: str = "") -> str:
-        """Create a point-by-point rubric (with expected answer) for a fixed question.
-        The professor's instructions/notes shape the criteria (e.g. points for shown work).
-        answer_key: the professor's own answer (imported answer key); used instead of solving."""
+                        instructions: str = "", notes: str = "", answer_key: str = ""):
+        """Create a structured rubric (expected answer + items with points, add-up scoring) for a
+        fixed question; returns a models.Rubric. The professor's instructions/notes shape the
+        criteria (e.g. points for shown work). answer_key: the professor's own answer (imported
+        answer key); used instead of solving."""
         key = (f"The professor's answer key for this question:\n{answer_key.strip()}\n"
                "This answer is authoritative: use it as expected_answer (you may restate it "
                "concisely) and do not contradict it.\n\n") if answer_key.strip() else ""
+        given = [w for w, s in (("instructions", instructions), ("notes for this question", notes)) if s.strip()]
+        # the professor's words were only context before; the rules below must not overrule them
+        follow = (f"The professor's {' and '.join(given)} above come first: write the criteria so they "
+                  "follow them (what to accept, what earns or loses points, partial credit), even where "
+                  "they differ from the other rules in this request.\n") if given else ""
         prompt = (
             f"Write a grading rubric for exam problem {problem or ''}.\n\n"
             f"Question (LaTeX):\n{question_latex}\n\n"
@@ -562,6 +656,7 @@ class LLMClient:
             "True/false questions get NO partial credit: write exactly one criterion, worth all "
             f"{max_points:g} points, for the correct answer (with its justification, if the question "
             "asks for one); the student gets all of it or nothing.\n"
+            + follow +
             "Respond ONLY as JSON: {\"expected_answer\": string, "
             "\"criteria\": [{\"description\": string, \"points\": number}]}"
         )
@@ -570,7 +665,7 @@ class LLMClient:
         d = _extract_json(text)
         if not d or not d.get("criteria"):
             raise ValueError(f"Could not parse rubric from model output:\n{_strip_reasoning(text)[:500]}")
-        return format_rubric(d, max_points)
+        return rubric_from_reply(d, max_points)
 
     def detect_layout(self, image_b64: str, width: int, height: int,
                       sent_w: int = None, sent_h: int = None, columns: int = 0) -> dict:
@@ -623,6 +718,7 @@ class LLMClient:
         the model also writes next_part_notes for them. strictness: 5 (very generous) .. 10 (strict).
         Returns {transcription, score, feedback, needs_human_review, review_reason,
         confidence (0-1), continues_elsewhere, next_part_notes}."""
+        rubric = rubric_text(rubric, max_points)
         prompt = (
             f"Problem {problem} (section '{group}'). Maximum points: {max_points:g}.\n\n"
             f"Question:\n{question or '(question text not provided; infer it from the image)'}\n\n"
@@ -805,6 +901,24 @@ def downscale_for_llm(img, max_side: int = 1280):
     if s < 1.0:
         img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
     return img, img.shape[1], img.shape[0]
+
+def rubric_text(rubric, max_points: float) -> str:
+    """The rubric as prompt text: a models.Rubric is rendered, text is passed through."""
+    return rubric.as_text(max_points) if hasattr(rubric, "as_text") else (rubric or "")
+
+def rubric_from_reply(d: dict, max_points: float):
+    """{"expected_answer", "criteria": [{"description", "points"}]} -> models.Rubric (add-up)."""
+    from ..models import Rubric, RubricItem
+    items = []
+    for c in d.get("criteria", []) or []:
+        try:
+            pts = float(c.get("points", 0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        desc = str(c.get("description", "")).strip()
+        if desc:
+            items.append(RubricItem(pts, desc))
+    return Rubric(max_points=max_points, expected_answer=str(d.get("expected_answer", "")).strip(), items=items)
 
 def format_rubric(d: dict, max_points: float) -> str:
     lines = [f"Expected answer: {d.get('expected_answer', '').strip()}", "", "Criteria:"]

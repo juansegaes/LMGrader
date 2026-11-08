@@ -9,7 +9,7 @@ from ..template.alignment import read_image, align_with_score, crop_region, save
 from ..template.template import question_context, siblings
 from ..llm.client import LLMClient, image_to_b64, prepare_crop, downscale_for_llm
 from ..llm.back_pages import route_back_page, grade_with_continuation, bbox_to_pixels
-from ..db import save_grade, list_grades, list_submissions, update_submission
+from ..db import save_grade, list_grades, list_submissions, update_submission, human_grade_exists, get_grade
 from .back_page import analyze_back_page
 from ..config import data_dir, MIN_ALIGN_INLIERS, CROP_PADDING, CONTINUATION_PATTERNS, LLM_CONFIG
 from ..db import get_exam_instructions, get_exam_strictness
@@ -214,7 +214,9 @@ class Grader:
     def grade_submission(self, template: TestTemplate, submission: Submission,
                          progress_cb=None, should_stop=None) -> List[Grade]:
         """Grade every region. Regions that already have a saved grade are skipped, so an
-        interrupted run (crash, power loss, cancel) resumes where it stopped."""
+        interrupted run (crash, power loss, cancel) resumes where it stopped. A question a human
+        grades meanwhile (Hand Grade tab) is never overwritten: it is checked again right before
+        the LLM is asked and before its grade is saved."""
         aligned, inliers = align_pages(template, submission)
         done = {g.region_id: g for g in list_grades(submission.id)}
 
@@ -232,7 +234,13 @@ class Grader:
                 continue
             if should_stop and should_stop():
                 break
+            if human_grade_exists(submission.id, i):      # graded by hand while this test was queued
+                graded[i] = get_grade(submission.id, i)
+                continue
             g, skipped = self._grade_region(template, submission, i, aligned, inliers, back, graded, ctx)
+            if human_grade_exists(submission.id, i):      # ...or while the LLM was answering
+                graded[i] = get_grade(submission.id, i)
+                continue
             back_skipped = back_skipped or skipped
             save_grade(g)   # persisted per region: this is the resume point
             graded[i] = g
@@ -265,8 +273,8 @@ class Grader:
         threshold, floor = review_settings()
         ext_dir = data_dir() / "extracted"
         ext_dir.mkdir(parents=True, exist_ok=True)
-        return dict(instructions=get_exam_instructions(template.exam_name),
-                    strictness=get_exam_strictness(template.exam_name),
+        return dict(instructions=get_exam_instructions(template.exam_name, template.course_id),
+                    strictness=get_exam_strictness(template.exam_name, template.course_id),
                     threshold=threshold, full_marks_floor=floor,
                     ignore_back_full=bool(LLM_CONFIG.get("full_marks_ignore_back", True)), ext_dir=ext_dir)
 
@@ -290,15 +298,16 @@ class Grader:
             save_image(ext_path, crop)
             kw = dict(question=question, instructions=ctx["instructions"], notes=region.grading_notes,
                       prior_notes=prior, has_next=has_next, strictness=ctx["strictness"])
+            rubric = region.rubric.as_text(region.points)
             if i in back.crops:
                 back_img = _stack(back.crops[i])
                 save_image(str(ctx["ext_dir"] / f"sub_{submission.id}_r{i}_back.png"), back_img)
                 res = grade_with_continuation(
                     self.llm, image_to_b64(prepare_crop(crop)), image_to_b64(prepare_crop(back_img)),
-                    region.problem, region.group, region.rubric, region.points, **kw)
+                    region.problem, region.group, rubric, region.points, **kw)
             else:
                 res = self.llm.grade_answer(image_to_b64(prepare_crop(crop)), region.problem, region.group,
-                                            region.rubric, region.points, **kw)
+                                            rubric, region.points, **kw)
             g = Grade(
                 submission_id=submission.id, region_id=i, problem=region.problem, group=region.group,
                 score=res["score"], max_points=region.points, feedback=res["feedback"],

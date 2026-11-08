@@ -1,7 +1,7 @@
 [project]
 name = "lmgrader"
-version = "0.2.0"
-description = "FOSS local alternative to Gradescope for grading physical test templates"
+version = "0.3.141592"
+description = "FOSS local app for grading physical test templates"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -16,6 +16,11 @@ dependencies = [
     "rapidfuzz>=3.0",
     "pypdfium2>=4.0",
     "pytwain>=2.0; sys_platform == 'win32'",
+    # handwritten names / IDs read locally with TrOCR (microsoft/trocr-base-handwritten, CPU);
+    # on Linux, `pip install torch --index-url https://download.pytorch.org/whl/cpu` first avoids
+    # the large CUDA build
+    "torch>=2.9",
+    "transformers>=4.46",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +37,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lmgrader = ["ui/assets/*.svg", "assets/answer_key_skill/*.md"]
+lmgrader = ["ui/assets/*.svg", "assets/answer_key_skill/*.md", "assets/*.npz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

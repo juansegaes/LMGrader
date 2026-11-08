@@ -10,6 +10,7 @@ Presets:
 import csv
 import os
 import re
+import shutil
 import zipfile
 from typing import Callable, List, Optional
 from ..db import add_return
@@ -114,3 +115,24 @@ def export_lms(exam_name: str, out_dir: str, preset: str = "generic", pattern: s
     if progress:
         progress(len(items), len(items), f"Exported {len(items)} tests")
     return {"zip": zip_path, "csv": csv_path, "files": files, "warnings": warnings}
+
+def export_pdfs(items, out_dir, pattern=DEFAULT_PATTERN, progress=None, make_pdf=ensure_pdf) -> List[str]:
+    """Copy each item's feedback PDF into out_dir, named by the pattern. Returns the file names written."""
+    os.makedirs(out_dir, exist_ok=True)
+    items = list(items)
+    n = len(items)
+    files, used = [], set()
+    for i, it in enumerate(items):
+        pdf = make_pdf(it)
+        name = filename_for(it, pattern)
+        if name in used:
+            name = name[:-4] + f"_{it.sub.id}.pdf"
+        used.add(name)
+        if progress:
+            progress(i, n, f"Exporting {name}…")
+        shutil.copyfile(pdf, os.path.join(out_dir, name))
+        add_return(it.sub.id, "pdf", out_dir, "exported", "", pdf)
+        files.append(name)
+    if progress:
+        progress(n, n, f"Exported {n} PDFs")
+    return files

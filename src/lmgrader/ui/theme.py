@@ -52,12 +52,20 @@ QListWidget#nav::item:selected {{ background: {ACCENT}; color: {ON_ACCENT}; }}
 QPushButton#sidebarBtn {{ background: transparent; border: none; color: {SIDEBAR_TEXT}; text-align: left;
     padding: 8px 20px; }}
 QPushButton#sidebarBtn:hover {{ background: {SIDEBAR_HOVER}; color: white; }}
+QLabel#courseLabel {{ color: {SIDEBAR_SUB}; font-size: 8pt; font-weight: 600; padding: 0 18px 2px 18px; }}
+QComboBox#coursePicker {{ background: {SIDEBAR_HOVER}; color: white; border: none; border-radius: 8px;
+    padding: 7px 10px; margin: 0 12px; font-weight: 600; }}
+QComboBox#coursePicker QAbstractItemView {{ color: {TEXT}; }}
+QPushButton#courseManage {{ background: transparent; border: none; color: {SIDEBAR_SUB}; text-align: left;
+    padding: 4px 20px 10px 20px; font-size: 9pt; }}
+QPushButton#courseManage:hover {{ color: white; }}
 QLabel#pageTitle {{ font-size: 17pt; font-weight: 700; }}
 QLabel#pageSubtitle {{ color: {MUTED}; }}
 QLabel#sectionTitle {{ font-size: 11pt; font-weight: 600; }}
 QLabel#muted {{ color: {MUTED}; }}
 QLabel#pill {{ border-radius: 9px; padding: 2px 9px; font-size: 9pt; font-weight: 600; }}
 QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 10px; }}
+QFrame#card[current="true"] {{ border: 1px solid {ACCENT}; }}
 QLabel#thumb {{ background: {SURFACE_ALT}; border: 1px solid {BORDER}; border-radius: 6px; }}
 QFrame#banner {{ background: {WARN_SOFT}; border: 1px solid {WARN_BORDER}; border-radius: 8px; }}
 QPushButton {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 7px; padding: 6px 14px; }}
@@ -220,9 +228,10 @@ def setup_page(w: QWidget, title: str, subtitle: str = ""):
     titles.setSpacing(2)
     titles.addWidget(label(title, "pageTitle"))
     if subtitle:
-        titles.addWidget(label(subtitle, "pageSubtitle"))
-    head.addLayout(titles)
-    head.addStretch()
+        sub = label(subtitle, "pageSubtitle")
+        sub.setWordWrap(True)        # a long subtitle wraps instead of being cut off by the header buttons
+        titles.addWidget(sub)
+    head.addLayout(titles, 1)        # the titles take the room the buttons leave
     actions = QHBoxLayout()
     actions.setSpacing(8)
     head.addLayout(actions)

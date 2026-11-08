@@ -154,5 +154,5 @@ def test_tex_import_fills_template(tmp_path):
     a, b, tf, mc, _ = t.regions
     assert rep.matched == ["Q1 (a)", "Q1 (b)", "Q2", "Q3"] and rep.no_box == ["4"]
     assert t.stems["1"].startswith("Let $A") and a.points == 4 and b.answer_key
-    assert tf.rubric.endswith("(all or nothing: no partial credit)") and "(C)" in mc.rubric
-    assert a.rubric == "" and rep.rubrics_from_key == ["Q2", "Q3"]     # open questions: rubric by LLM
+    assert tf.rubric.as_text().endswith("(all or nothing: no partial credit)") and "(C)" in mc.rubric.as_text()
+    assert not a.rubric and rep.rubrics_from_key == ["Q2", "Q3"]     # open questions: rubric by LLM

@@ -2,8 +2,9 @@
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLineEdit, QMessageBox, QComboBox, QFormLayout,
                              QSpinBox, QDoubleSpinBox, QPlainTextEdit, QScrollArea, QCheckBox)
 from PyQt6.QtCore import Qt
+from .. import config
 from ..config import (LLM_CONFIG, SMTP_CONFIG, UI_CONFIG, save_settings, settings_path, clamp_strictness,
-                      STRICTNESS_MIN, STRICTNESS_MAX)
+                      STRICTNESS_MIN, STRICTNESS_MAX, llm_enabled)
 from ..llm import LLMClient
 from ..grading.grader import reapply_full_marks_rules
 from ..llm.client import STRICTNESS_NAMES
@@ -13,7 +14,8 @@ from .theme import button, card, label, setup_page
 class SettingsView(QWidget):
     def __init__(self):
         super().__init__()
-        body, actions = setup_page(self, "Settings", "Local LLM server (LM Studio or any OpenAI-compatible API).")
+        body, actions = setup_page(self, "Settings", "Appearance, the LLM (optional) and email for returning tests."
+                                   if config.EMAIL_ENABLED else "Appearance and the local LLM (optional).")
         self.btn_save = button("Save", "primary")
         actions.addWidget(self.btn_save)
 
@@ -30,6 +32,22 @@ class SettingsView(QWidget):
         al.addLayout(af)
         ac.setMaximumWidth(820)
         self.in_theme.activated.connect(self._theme_chosen)
+
+        # ---- LLM on/off (applied on Save) ----
+        lc, ll = card(margins=18)
+        ll.addWidget(label("LLM", "sectionTitle"))
+        self.chk_llm = QCheckBox("Use an LLM (LM Studio, another OpenAI-compatible server, or OpenRouter)"
+                                 if config.OPENROUTER_ENABLED else
+                                 "Use an LLM (LM Studio or another OpenAI-compatible server on this computer)")
+        self.chk_llm.setChecked(llm_enabled())
+        ll.addWidget(self.chk_llm)
+        off = label("Off: LMGrader never contacts an LLM. Names and student IDs are read on this computer "
+                    "(TrOCR) and matched to the roster, you grade in Hand Grade, and boxes, questions and "
+                    "rubrics are drawn, typed or imported. The LLM Grade tab and the AI buttons are hidden.",
+                    "muted")
+        off.setWordWrap(True)
+        ll.addWidget(off)
+        lc.setMaximumWidth(820)
 
         c, cl = card(margins=18)
         cl.addWidget(label("Connection", "sectionTitle"))
@@ -49,6 +67,34 @@ class SettingsView(QWidget):
         form.addRow("Vision model", mrow)
         cl.addLayout(form)
         cl.addWidget(label("Use a vision-capable model (e.g. Qwen2.5-VL, Gemma 3, Llama 3.2 Vision).", "muted"))
+
+        # (hidden while OpenRouter is off: config.OPENROUTER_ENABLED)
+        self.grading_box = QWidget()
+        gbl = QVBoxLayout(self.grading_box)
+        gbl.setContentsMargins(0, 8, 0, 0)
+        gbl.addWidget(label("Grading model", "sectionTitle"))
+        gform = QFormLayout()
+        self.in_provider = QComboBox()
+        self.in_provider.addItem("Local model (above)", "local")
+        self.in_provider.addItem("OpenRouter", "openrouter")
+        self.in_provider.setCurrentIndex(max(0, self.in_provider.findData(
+            LLM_CONFIG.get("grading_provider", "local"))))
+        self.in_provider.setMaximumWidth(260)
+        self.in_or_model = QLineEdit(LLM_CONFIG.get("openrouter_model", ""))
+        self.in_or_model.setPlaceholderText("qwen/qwen3-vl-8b-instruct")
+        self.in_or_model.setEnabled(self.in_provider.currentData() == "openrouter")
+        self.in_provider.currentIndexChanged.connect(
+            lambda _i: self.in_or_model.setEnabled(self.in_provider.currentData() == "openrouter"))
+        gform.addRow("Grade answers with", self.in_provider)
+        gform.addRow("OpenRouter model", self.in_or_model)
+        gbl.addLayout(gform)
+        gl = label("OpenRouter reads its key from OPENROUTER_API_KEY in a .env file (project folder or "
+                   "~/.lmgrader) or the environment. Name reading, question and rubric generation always "
+                   "use the local model. Pages of the tests being graded are sent to OpenRouter.", "muted")
+        gl.setWordWrap(True)
+        gbl.addWidget(gl)
+        cl.addWidget(self.grading_box)
+        self.grading_box.setVisible(config.OPENROUTER_ENABLED)
 
         cl.addSpacing(8)
         cl.addWidget(label("Generation", "sectionTitle"))
@@ -106,8 +152,10 @@ class SettingsView(QWidget):
                     "to a human, as do answers the AI flags as illegible or ambiguous.", "muted")
         lbl.setWordWrap(True)
         cl.addWidget(lbl)
-        cl.addWidget(label(f"Saved to {settings_path()}", "muted"))
         c.setMaximumWidth(820)
+        self.llm_card = c
+        c.setEnabled(self.chk_llm.isChecked())
+        self.chk_llm.toggled.connect(c.setEnabled)
 
         # ---- Email (SMTP) for returning tests ----
         ec, el = card(margins=18)
@@ -147,10 +195,14 @@ class SettingsView(QWidget):
         self.in_sec.currentTextChanged.connect(
             lambda t: self.in_port.setValue({"SSL": 465, "STARTTLS": 587}.get(t, self.in_port.value())))
         ec.setMaximumWidth(820)
+        self.email_card = ec
+        ec.setVisible(config.EMAIL_ENABLED)
 
         inner = QWidget(); il = QVBoxLayout(inner); il.setContentsMargins(0, 0, 0, 0); il.setSpacing(14)
         inner.setObjectName("page"); inner.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        il.addWidget(ac); il.addWidget(c); il.addWidget(ec); il.addStretch()
+        il.addWidget(ac); il.addWidget(lc); il.addWidget(c); il.addWidget(ec)
+        il.addWidget(label(f"Settings are saved to {settings_path()}", "muted"))
+        il.addStretch()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(inner)
         body.addWidget(scroll, 1)
 
@@ -174,9 +226,13 @@ class SettingsView(QWidget):
             theme.apply_theme(QApplication.instance(), choice)
 
     def save(self):
+        was_on = llm_enabled()
+        LLM_CONFIG["enabled"] = self.chk_llm.isChecked()
         LLM_CONFIG["base_url"] = self.in_url.text().strip()
         LLM_CONFIG["api_key"] = self.in_key.text().strip()
         LLM_CONFIG["model"] = self.in_model.currentText().strip()
+        LLM_CONFIG["grading_provider"] = self.in_provider.currentData()
+        LLM_CONFIG["openrouter_model"] = self.in_or_model.text().strip() or "qwen/qwen3-vl-8b-instruct"
         LLM_CONFIG["max_tokens"] = self.in_tokens.value()
         LLM_CONFIG["temperature"] = self.in_temp.value()
         LLM_CONFIG["review_confidence"] = self.in_conf.value() / 100
@@ -195,7 +251,13 @@ class SettingsView(QWidget):
         msg = "Settings saved."
         if cleared:
             msg += f" {cleared} full-marks question{'s' if cleared != 1 else ''} no longer need a human."
-        self.window().statusBar().showMessage(msg, 5000)
+        win = self.window()
+        if llm_enabled() != was_on:
+            msg += " The LLM is on." if llm_enabled() else " The LLM is off: nothing is sent to an LLM."
+            if hasattr(win, "apply_llm_mode"):
+                win.apply_llm_mode()
+        if hasattr(win, "statusBar"):
+            win.statusBar().showMessage(msg, 5000)
 
     def list_models(self):
         c = LLMClient(base_url=self.in_url.text().strip(), api_key=self.in_key.text().strip())

@@ -8,7 +8,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 from ..models import (Submission, TestTemplate, Student, BLANK, double_sided_layout, SUB_NEW, SUB_IDENTIFIED,
                       SUB_READY, SUB_GRADING, SUB_GRADED, SUB_ERROR)
 from ..db import (add_submission, update_submission, list_submissions_by_status, load_template, connect,
-                  delete_grades)
+                  delete_grades, get_submission, list_grades, set_submission_status)
 from .identify import identify
 from .grader import Grader
 
@@ -67,14 +67,15 @@ def create_submissions(exam_name: str, pages: List[str], spec: Union[TestTemplat
     return subs, leftover
 
 def identify_submission(sub: Submission, versions: List[TestTemplate], students: List[Student], llm=None,
-                        save_crops: bool = True) -> Submission:
-    """Detect version + read the student ID / name. A confident match is ready to grade;
-    anything else waits in 'identified' until a human confirms the student."""
+                        save_crops: bool = True, ocr=None) -> Submission:
+    """Detect version + read the student ID / name (TrOCR `ocr` first, then the LLM if unsure).
+    A confident match is ready to grade; anything else waits in 'identified' until a human
+    confirms the student."""
     forced = None
     if sub.version_confirmed:        # never override a version a human picked
         forced = next((v for v in versions if v.id == sub.template_id), None) or load_template(sub.template_id)
     ident = identify(sub.pages, versions, students, llm, save_crops_for=sub.id if save_crops and sub.id else None,
-                     forced=forced)
+                     forced=forced, ocr=ocr)
     if not sub.version_confirmed:
         sub.version_read = ident.version_read
     if ident.template is None:
@@ -125,12 +126,37 @@ def version_hold(sub: Submission) -> bool:
     """The version field couldn't be read and nobody has picked the version yet."""
     return not sub.version_confirmed and "version field unreadable" in (sub.error or "")
 
+def all_questions_graded(sub: Submission, template: Optional[TestTemplate] = None) -> bool:
+    template = template or (load_template(sub.template_id) if sub.template_id else None)
+    if template is None or not template.regions:
+        return False
+    graded = {g.region_id for g in list_grades(sub.id)}
+    return all(i in graded for i in range(len(template.regions)))
+
+def refresh_status(sub_id: int, template: Optional[TestTemplate] = None) -> Optional[str]:
+    """After grades changed outside an LLM run (hand grading): a ready test with every question
+    graded becomes graded, a graded one missing grades goes back to ready. Tests waiting for
+    their student/version, being graded by the LLM or failed are left alone. Only the status
+    column is written (the LLM Grade tab may be saving the same test)."""
+    sub = get_submission(sub_id)
+    if sub is None:
+        return None
+    if sub.status not in (SUB_READY, SUB_GRADED):
+        return sub.status
+    complete = all_questions_graded(sub, template)
+    status = SUB_GRADED if complete else SUB_READY
+    if status != sub.status:
+        set_submission_status(sub.id, status)
+    return status
+
 def confirm_student(sub: Submission, student_id: Optional[int]):
-    """Human sets/confirms the student."""
+    """Human sets/confirms the student. A test already graded completely by hand is graded."""
     sub.student_id = student_id
     sub.name_confirmed = student_id is not None
     if sub.status in (SUB_NEW, SUB_IDENTIFIED, SUB_READY) and sub.template_id:
         sub.status = SUB_READY if student_id and not version_hold(sub) else SUB_IDENTIFIED
+        if sub.status == SUB_READY and all_questions_graded(sub):
+            sub.status = SUB_GRADED
     update_submission(sub)
 
 def reset_for_regrade(sub: Submission, keep_human: bool = True) -> int:
@@ -194,7 +220,7 @@ def grade_one(grader: Grader, sub: Submission, progress_cb=None, should_stop=Non
 def recover_interrupted() -> int:
     """On startup: submissions left in 'grading' by a crash go back to 'ready' (grades already
     saved are kept and skipped when grading resumes)."""
-    stuck = list_submissions_by_status(statuses=[SUB_GRADING])
+    stuck = list_submissions_by_status(statuses=[SUB_GRADING], all_courses=True)
     for s in stuck:
         s.status = SUB_READY
         update_submission(s)

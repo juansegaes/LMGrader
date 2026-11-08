@@ -5,18 +5,19 @@ import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QLabel,
                              QMessageBox, QComboBox, QLineEdit, QSplitter, QScrollArea, QDoubleSpinBox,
                              QHeaderView, QAbstractItemView, QFileDialog, QFrame, QPlainTextEdit, QDialog,
-                             QProgressDialog)
+                             QProgressDialog, QApplication, QPushButton)
 from PyQt6.QtCore import Qt, QUrl, QTimer
-from PyQt6.QtGui import QColor, QDesktopServices, QFontInfo
-from ..db import (list_submissions, list_grades, list_students, list_templates, update_submission,
+from PyQt6.QtGui import QColor, QDesktopServices, QFontInfo, QKeySequence, QShortcut
+from ..db import (list_submissions, list_grades, list_students, list_templates, update_submission, current_course,
                   save_grade, delete_submission, get_submission, load_template)
 from ..grading.grader import Grader
 from ..llm import LLMClient
+from ..config import llm_enabled
 from ..template.alignment import read_image
 from ..models import SUB_GRADED
 from . import theme
 from .theme import button, card, label, pill, setup_page
-from .widgets import ImageThumb, PageViewer, Overlay, Worker
+from .widgets import ImageThumb, PageViewer, Overlay, Worker, FlowLayout
 from .mathtext import latex_html
 from ..export import feedback as fb_export
 
@@ -66,6 +67,31 @@ def involves_back(review_reason: str) -> bool:
 
 def _pending_count(grades) -> int:
     return sum(1 for g in grades if g.needs_human_review)
+
+# keyboard shortcuts of the Review page (window-wide while it is shown; also in the hint line)
+KEYS_NEXT_QUESTION, KEYS_PREV_QUESTION = ("Alt+Down",), ("Alt+Up",)
+KEYS_NEXT_TEST, KEYS_PREV_TEST = ("Alt+Right",), ("Alt+Left",)
+KEYS_ACCEPT_NEXT = ("Ctrl+Return", "Ctrl+Enter")
+KEYS_NEXT_FLAGGED = ("F3",)
+KEYS_HINT = ("Keys: Alt+↑ / Alt+↓ question  ·  Alt+← / Alt+→ test  ·  Ctrl+Enter accept & next flagged  ·  "
+             "F3 next flagged")
+
+def chip_state(g):
+    """(mark, color, words) of a question's chip: needs a human, graded by a person, or an AI grade."""
+    if g.needs_human_review:
+        return "⚠ ", theme.WARN, "needs your grade"
+    if g.human_graded:
+        return "✓ ", theme.OK, ("graded in Hand Grade" if g.source == "hand" else "graded by you")
+    return "", theme.TEXT, "AI grade"
+
+def _style_chip(b: QPushButton, color: str):
+    c = QColor(color)
+    b.setStyleSheet(
+        f"QPushButton {{ background: rgba({c.red()},{c.green()},{c.blue()},22); color: {color}; "
+        f"border: 1px solid rgba({c.red()},{c.green()},{c.blue()},70); border-radius: 11px; "
+        f"padding: 2px 10px; font-size: 9pt; font-weight: 600; }}"
+        f"QPushButton:hover {{ border-color: {theme.ACCENT}; }}"
+        f"QPushButton:checked {{ border: 2px solid {theme.ACCENT}; padding: 1px 9px; }}")
 
 class GradeCard(QFrame):
     """One question of a submission. A flagged question is graded by a human: the AI score is
@@ -120,7 +146,8 @@ class GradeCard(QFrame):
             if not back:
                 brow.addWidget(label("No back page was scanned — check the paper", "muted"))
         self.btn_ok = button("Accept suggestion", "primary",
-                             "Keep the AI score as your grade (or just type a different score)")
+                             "Keep the AI score as your grade (or just type a different score). "
+                             "Ctrl+Enter: accept and go to the next flagged question")
         brow.addWidget(self.btn_ok)
         bv.addLayout(brow)
         lay.addWidget(self.banner)
@@ -154,6 +181,7 @@ class GradeCard(QFrame):
                                 "Ask the AI to grade this question again; the new score and feedback "
                                 "replace the current ones")
         self.btn_retry.setEnabled(on_retry is not None)
+        self.btn_retry.setVisible(llm_enabled())        # Settings → "Use an LLM"
         if on_retry is not None:
             self.btn_retry.clicked.connect(lambda: on_retry(self))
         vrow.addWidget(self.btn_retry)
@@ -201,6 +229,12 @@ class GradeCard(QFrame):
         self._refresh_state()
         self._loading = False
 
+    def set_current(self, on: bool):
+        """Outline the question the keyboard works on (Alt+↑/↓, Ctrl+Enter)."""
+        if bool(self.property("current")) != on:
+            self.setProperty("current", on)
+            self.style().unpolish(self); self.style().polish(self)
+
     def _show_rubric(self, shown: bool):
         self.rubric_box.setVisible(shown)
         self.btn_rubric.setText("Hide rubric" if shown else "Show rubric")
@@ -214,7 +248,7 @@ class GradeCard(QFrame):
         pending = g.needs_human_review
         self.banner.setVisible(pending)
         if g.human_graded:
-            text, color = "Human ✓", theme.OK
+            text, color = ("Hand ✓" if g.source == "hand" else "Human ✓"), theme.OK
         else:
             text = f"AI {g.confidence * 100:.0f}%"
             color = theme.WARN if pending else theme.MUTED
@@ -261,7 +295,8 @@ class ReviewView(QWidget):
         super().__init__()
         body, actions = setup_page(self, "Review", "Check flagged answers, adjust scores and export results.")
         self.btn_next = button("Next flagged", tooltip="Scroll to the next question that needs a human grade; "
-                                                       "after the last one, go to the next test that needs review")
+                                                       "after the last one, go to the next test that needs review "
+                                                       "(F3)")
         self.btn_preview = button("Preview feedback", tooltip="Show the feedback page of this test's returned PDF")
         self.btn_pdf = button("Feedback PDF…", tooltip="Annotated PDF (red scores + feedback) for this student")
         self.btn_pdf_all = button("Export all PDFs…", "primary",
@@ -316,11 +351,30 @@ class ReviewView(QWidget):
         self.detail_layout.setContentsMargins(0, 0, 6, 0)
         self.detail_layout.setSpacing(10)
         self.detail_scroll.setWidget(self.detail)
-        split.addWidget(self.detail_scroll)
+        # question chips stay above the scrolling cards (always visible while moving between them)
+        right = QWidget()
+        rlay = QVBoxLayout(right)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.setSpacing(8)
+        self.chip_bar, cbl = card(margins=10)
+        cbl.setSpacing(6)
+        self.chip_flow = FlowLayout(spacing=6)
+        cbl.addLayout(self.chip_flow)
+        keys = label(KEYS_HINT, "muted")
+        keys.setWordWrap(True)
+        keys.setStyleSheet("font-size: 8pt;")
+        cbl.addWidget(keys)
+        self.chip_bar.setVisible(False)
+        rlay.addWidget(self.chip_bar)
+        rlay.addWidget(self.detail_scroll, 1)
+        split.addWidget(right)
         split.setSizes([420, 700])
         body.addWidget(split, 1)
 
         self.cb_exam.currentIndexChanged.connect(self.load_submissions)
+        self._all_exams_chosen = False       # the user picked "All exams": other tabs don't change it
+        self.cb_exam.activated.connect(
+            lambda _: setattr(self, "_all_exams_chosen", self.cb_exam.currentData() is None))
         self.cb_filter.currentIndexChanged.connect(self.load_submissions)
         self.in_search.textChanged.connect(self.load_submissions)
         self.table.itemSelectionChanged.connect(self.show_detail)
@@ -332,14 +386,43 @@ class ReviewView(QWidget):
         self.btn_delete.clicked.connect(self.delete_selected)
         self._rows = []   # (submission, grades) per table row
         self._current = None
+        self.grade_cards = []
+        self.chips = []          # one per question card, same order
+        self._cur_card = None    # the question the keyboard works on (outlined, its chip checked)
+        # window-wide while Review is shown (a hidden page's shortcuts are off), so they work
+        # right after opening the tab, whatever has the focus
+        for keys, slot in ((KEYS_NEXT_QUESTION, self.next_question), (KEYS_PREV_QUESTION, self.prev_question),
+                           (KEYS_NEXT_TEST, self.next_test), (KEYS_PREV_TEST, self.prev_test),
+                           (KEYS_ACCEPT_NEXT, self.accept_and_next), (KEYS_NEXT_FLAGGED, self.next_flagged)):
+            for k in keys:
+                QShortcut(QKeySequence(k), self, activated=lambda s=slot: s(),
+                          context=Qt.ShortcutContext.WindowShortcut)
+        QApplication.instance().focusChanged.connect(self._focus_moved)
         self.refresh()
 
     # ---------- list ----------
+    def context(self):
+        """(exam, version id) for the other tabs: the open test's exam and version, else the
+        exam picked here ("All exams" gives nothing)."""
+        t = self.templates.get(self._current.template_id) if self._current is not None else None
+        if t is not None:
+            return t.exam_name, t.id
+        return self.cb_exam.currentData(), None
+
+    def set_context(self, exam, tid=None):
+        """Show this exam at the next refresh, unless "All exams" was picked here (it includes
+        every exam)."""
+        if exam and not self._all_exams_chosen:
+            self._want_exam = exam
+
     def refresh(self):
-        self.templates = {t.id: t for t in list_templates()}
-        self.students = list_students()
-        self.student_names = {s.id: s.name for s in self.students}
-        cur = self.cb_exam.currentData()
+        self.templates = {t.id: t for t in list_templates()}          # the current course's exams
+        self.students = list_students()                                 # its roster (student picker)
+        self.all_students = {s.id: s for s in list_students(all_courses=True)}   # names of any test
+        self.student_names = {s.id: s.name for s in self.all_students.values()}
+        want, self._want_exam = getattr(self, "_want_exam", None), None
+        cur = want if want and any(t.exam_name == want for t in self.templates.values()) \
+            else self.cb_exam.currentData()
         self.cb_exam.blockSignals(True)
         self.cb_exam.clear()
         self.cb_exam.addItem("All exams", None)
@@ -351,8 +434,8 @@ class ReviewView(QWidget):
 
     def load_submissions(self):
         exam = self.cb_exam.currentData()
-        ids = [t.id for t in self.templates.values() if t.exam_name == exam] if exam else None
-        subs = list_submissions(template_ids=ids) if ids is not None else list_submissions()
+        ids = [t.id for t in self.templates.values() if t.exam_name == exam] if exam else list(self.templates)
+        subs = list_submissions(template_ids=ids)          # "All exams": every exam of the course
         mode = self.cb_filter.currentText()
         q = self.in_search.text().strip().lower()
         keep_id = self._current.id if self._current else None
@@ -362,7 +445,7 @@ class ReviewView(QWidget):
         shown = 0
         for sub in subs:
             grades = list_grades(sub.id)
-            # tests without grades (new / identified / ready) belong to Scan & Grade
+            # tests without grades (new / identified / ready) belong to Scan & Names / the grade tabs
             if sub.status != SUB_GRADED and not grades:
                 continue
             shown += 1
@@ -408,7 +491,7 @@ class ReviewView(QWidget):
         if _is_partial(sub):
             st = QTableWidgetItem("Partially graded")
             st.setForeground(QColor(theme.ACCENT))
-            st.setToolTip("Grading was interrupted; resume it in Scan & Grade")
+            st.setToolTip("Not every question is graded yet: finish it in Hand Grade or LLM Grade")
         else:
             if n:
                 text = f"Needs human grade ({n})"
@@ -444,6 +527,13 @@ class ReviewView(QWidget):
     def _clear_detail(self, placeholder=False):
         self._flush_cards()
         self.grade_cards = []
+        self.chips = []
+        self._cur_card = None
+        while self.chip_flow.count():
+            w = self.chip_flow.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        self.chip_bar.setVisible(False)
         while self.detail_layout.count():
             item = self.detail_layout.takeAt(0)
             if item.widget():
@@ -518,8 +608,18 @@ class ReviewView(QWidget):
                 self.page_buttons.append(b)
         pages_row.addStretch()
         if _is_partial(sub):
-            pages_row.addWidget(label("Partially graded — resume in Scan & Grade", "muted"))
+            pages_row.addWidget(label("Partially graded — finish it in Hand Grade or LLM Grade", "muted"))
         hl.addLayout(pages_row)
+
+        # one chip per question: its state and score at a glance; a click jumps to it
+        for i, g in enumerate(grades):
+            b = QPushButton()
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _, i=i: self._chip_clicked(i))
+            self.chip_flow.addWidget(b)
+            self.chips.append(b)
+        self.chip_bar.setVisible(bool(grades))
 
         if sub.has_work_on_back and not sub.back_reviewed:
             ban = QFrame(); ban.setObjectName("banner")
@@ -540,12 +640,15 @@ class ReviewView(QWidget):
                       and 0 <= g.region_id < len(t.regions) else None)
             gc = GradeCard(g, lambda: self._grades_changed(row), p, backs=sub.backs, open_path=self._open,
                            front=front, rect=region.rect if region else None, view_page=self.view_page,
-                           rubric=region.rubric if region else "",
+                           rubric=region.rubric.as_text(region.points) if region else "",
                            on_retry=self.retry_grade if region is not None else None)
             self.grade_cards.append(gc)
             self.detail_layout.addWidget(gc)
         self.detail_layout.addStretch()
         self._update_total(grades)
+        self._update_chips()
+        if self.grade_cards:     # outlined; the focus stays where it is (e.g. the table: ↑/↓ pick tests)
+            self._set_current(self.grade_cards[0])
 
     def _update_total(self, grades):
         self.lbl_total.setText(self._total_text(grades))
@@ -594,6 +697,7 @@ class ReviewView(QWidget):
         sub, grades = self._rows[row]
         self._update_total(grades)
         self._fill_row(row, sub, grades)
+        self._update_chips()
 
     def _reassign(self, sub, student_id):
         sub.student_id = student_id
@@ -615,12 +719,13 @@ class ReviewView(QWidget):
                 save_grade(g)
         self.load_submissions()
 
-    def next_flagged(self):
-        """Scroll to the next question of this test (below the current view) that needs a human
-        grade; when none is left, select the next test that needs review (after the current
-        one, wrapping) and scroll to its first such question. Returns the selected row or -1."""
+    def next_flagged(self, after=None):
+        """Scroll to the next question of this test (below the current view, or after the card
+        `after`) that needs a human grade; when none is left, select the next test that needs
+        review (after the current one, wrapping) and scroll to its first such question. The
+        question's score box gets the focus. Returns the selected row or -1."""
         start = self._selected_row()
-        if start >= 0 and self._scroll_to_pending(below_view=True):
+        if start >= 0 and self._scroll_to_pending(below_view=True, after=after):
             return start
         n = len(self._rows)
         for k in range(1, n + 1):
@@ -639,16 +744,20 @@ class ReviewView(QWidget):
             if hasattr(self.window(), "statusBar") else None
         return -1
 
-    def _scroll_to_pending(self, below_view: bool) -> bool:
+    def _scroll_to_pending(self, below_view: bool, after=None) -> bool:
         """Put the next question card that needs a human grade at the top of the detail.
-        below_view: only cards after the one last jumped to (or below the scrolled-to point);
-        otherwise the first one of the test. False when there is none."""
+        after: only cards after this one; below_view: only cards after the one last jumped to
+        (or below the scrolled-to point); otherwise the first one of the test. False when
+        there is none."""
         try:
             pending = [(i, gc) for i, gc in enumerate(self.grade_cards) if gc.g.needs_human_review]
         except RuntimeError:   # cards already deleted
             return False
         sb = self.detail_scroll.verticalScrollBar()
-        if below_view:
+        if after is not None and after in self.grade_cards:
+            idx = self.grade_cards.index(after)
+            pending = [(i, gc) for i, gc in pending if i > idx]
+        elif below_view:
             jump = getattr(self, "_jump", None)
             if jump and jump[0] in self.grade_cards and sb.value() == jump[1]:
                 # the last card jumped to may not reach the top (end of the page): go past it
@@ -658,10 +767,153 @@ class ReviewView(QWidget):
                 pending = [(i, gc) for i, gc in pending if gc.y() > sb.value() + 4]
         if not pending:
             return False
-        gc = pending[0][1]
-        sb.setValue(gc.y())
-        self._jump = (gc, sb.value())
+        self._focus_card(pending[0][1])
         return True
+
+    # ---------- keyboard: questions and tests ----------
+    def _cards(self) -> list:
+        """The question cards of the open test (none once they are deleted)."""
+        try:
+            for gc in self.grade_cards:
+                gc.objectName()                 # raises once the widget is deleted
+        except RuntimeError:
+            return []
+        return list(self.grade_cards)
+
+    def _card_of(self, w):
+        """The question card holding widget `w`, or None."""
+        while w is not None:
+            if isinstance(w, GradeCard):
+                return w if w in self.grade_cards else None
+            w = w.parentWidget()
+        return None
+
+    def _set_current(self, gc):
+        """Outline `gc` and check its chip (no scrolling, the focus stays)."""
+        self._cur_card = gc
+        for c in self.grade_cards:
+            try:
+                c.set_current(c is gc)
+            except RuntimeError:
+                pass
+        for b, c in zip(self.chips, self.grade_cards):
+            b.setChecked(c is gc)
+
+    def _focus_card(self, gc, scroll: bool = True):
+        """Make `gc` the current question: scroll it to the top, outline it and put the cursor
+        in its score box (type a score, or Ctrl+Enter to accept the suggestion)."""
+        if scroll:
+            # lay the cards out again first: accepting a question hides its banner, which moves the
+            # cards below it up; their old position would scroll past the top of `gc`. Each card
+            # first (its new height), then the column of cards.
+            for c in self._cards():
+                c.layout().activate()
+            self.detail_layout.invalidate()
+            self.detail_layout.activate()
+            sb = self.detail_scroll.verticalScrollBar()
+            sb.setValue(gc.y())
+            self._jump = (gc, sb.value())
+        self._set_current(gc)
+        gc.spin.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        gc.spin.selectAll()
+
+    def _current_card(self):
+        """The question the keys work on: the one holding the focus, else the outlined one if it
+        is on screen, else the first one on screen."""
+        cards = self._cards()
+        if not cards:
+            return None
+        gc = self._card_of(QApplication.focusWidget())
+        if gc is not None:
+            return gc
+        top = self.detail_scroll.verticalScrollBar().value()
+        bottom = top + self.detail_scroll.viewport().height()
+        on_screen = [c for c in cards if c.y() < bottom and c.y() + c.height() > top]
+        if self._cur_card in on_screen:
+            return self._cur_card
+        return on_screen[0] if on_screen else cards[0]
+
+    def _focus_moved(self, _old, new):
+        """Clicking or tabbing into a question makes it the current one."""
+        try:
+            if not self.isVisible():
+                return
+            gc = self._card_of(new)
+        except RuntimeError:
+            return
+        if gc is not None and gc is not self._cur_card:
+            self._set_current(gc)
+
+    def _chip_clicked(self, i: int):
+        if 0 <= i < len(self.grade_cards):
+            self._focus_card(self.grade_cards[i])
+
+    def _update_chips(self):
+        for b, gc in zip(self.chips, self.grade_cards):
+            g = gc.g
+            mark, color, words = chip_state(g)
+            b.setText(f"{mark}{g.problem}  {g.score:g}/{g.max_points:g}")
+            b.setToolTip(f"{g.problem}: {g.score:g} / {g.max_points:g} · {words}. Click to go to it.")
+            _style_chip(b, color)
+
+    def _step_question(self, step: int) -> bool:
+        cards = self._cards()
+        cur = self._current_card()
+        if cur is None:
+            return False
+        i = cards.index(cur) + step
+        if not 0 <= i < len(cards):
+            self._status("This is the last question of the test." if step > 0 else
+                         "This is the first question of the test.")
+            return False
+        self._focus_card(cards[i])
+        return True
+
+    def next_question(self):
+        """Alt+↓: the next question of this test."""
+        return self._step_question(1)
+
+    def prev_question(self):
+        """Alt+↑: the previous question of this test."""
+        return self._step_question(-1)
+
+    def _step_test(self, step: int) -> int:
+        """Open the next/previous test of the list at its first question. Returns its row or -1."""
+        n = self.table.rowCount()
+        if not n:
+            return -1
+        row = self._selected_row()
+        target = (0 if step > 0 else n - 1) if row < 0 else row + step
+        if not 0 <= target < n:
+            self._status("This is the last test in the list." if step > 0 else "This is the first test in the list.")
+            return -1
+        self.table.selectRow(target)          # rebuilds the question cards
+        self.table.scrollToItem(self.table.item(target, 0))
+        self.detail_scroll.verticalScrollBar().setValue(0)
+        if self.grade_cards:
+            self._focus_card(self.grade_cards[0], scroll=False)
+        return target
+
+    def next_test(self):
+        """Alt+→: the next test in the list."""
+        return self._step_test(1)
+
+    def prev_test(self):
+        """Alt+←: the previous test in the list."""
+        return self._step_test(-1)
+
+    def accept_and_next(self):
+        """Ctrl+Enter: the current question's score becomes your grade (a flagged question's AI
+        suggestion is accepted; a score you typed already counts), then on to the next flagged
+        question. Questions nobody flagged are left as they are."""
+        gc = self._current_card()
+        if gc is None:
+            return -1
+        gc.spin.interpretText()               # a score still being typed
+        gc.flush()                            # feedback being typed
+        if gc.g.needs_human_review:
+            gc._mark_reviewed()
+        return self.next_flagged(after=gc)
 
     def retry_grade(self, card):
         """Grade one question again with the LLM, in the background. The new grade replaces the
@@ -683,7 +935,7 @@ class ReviewView(QWidget):
             template = load_template(sub.template_id) if sub else None
             if template is None:
                 raise RuntimeError("The test or its template no longer exists.")
-            grader = Grader(LLMClient.from_config())
+            grader = Grader(LLMClient.for_grading())
             worker.llm = grader.llm
             return grader.regrade_region(template, sub, region_id)
 
@@ -778,8 +1030,7 @@ class ReviewView(QWidget):
         self._flush_cards()
         sub, _ = self._rows[row]
         grades = list_grades(sub.id)
-        student = next((s for s in self.students if s.id == sub.student_id), None)
-        return sub, self.templates.get(sub.template_id), grades, student
+        return sub, self.templates.get(sub.template_id), grades, self.all_students.get(sub.student_id)
 
     def render_preview_page(self):
         """First page (scores + all feedback, PIL image) of the selected submission's returned
@@ -839,8 +1090,10 @@ class ReviewView(QWidget):
         prog.setWindowModality(Qt.WindowModality.WindowModal)
         prog.setMinimumDuration(0)
 
+        course = current_course()
+
         def job(worker=None):
-            return fb_export.export_exam(exam, out_dir,
+            return fb_export.export_exam(exam, out_dir, course_id=course,
                                          progress=lambda i, n, m: worker.progress.emit(i, n, m))
 
         def on_progress(i, n, msg):
@@ -877,7 +1130,7 @@ class ReviewView(QWidget):
             for g in grades:
                 if g.problem not in problems:
                     problems.append(g.problem)
-        sid_by_id = {s.id: s.student_id for s in self.students}
+        sid_by_id = {s.id: s.student_id for s in self.all_students.values()}
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow(["name", "student_id", "exam", "version", *problems, "total", "max", "needs_review"])

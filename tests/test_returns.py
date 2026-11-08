@@ -9,7 +9,7 @@ from lmgrader.grading import session, Grader
 from lmgrader.models import Student
 from lmgrader.template.alignment import save_image
 from lmgrader.template.template import create_template_from_image, add_region, persist
-from lmgrader.returns import collect_items, build_message, send_batch, send_test, set_password, export_lms
+from lmgrader.returns import collect_items, build_message, send_batch, send_test, set_password, export_lms, export_pdfs
 from lmgrader.returns import mailer
 from conftest import FakeLLM, make_page, SCREENSHOT_DIR
 
@@ -215,7 +215,8 @@ def test_lms_moodle(tmp_path):
     assert rows[1][0] == "Participant S001"
     assert any("participant id" in w for w in res["warnings"])
 
-def test_return_view_smoke(qapp, tmp_path):
+def test_return_view_smoke(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_ENABLED", True)
     subs = make_exam(tmp_path, "RetUI", ROSTER)
     send_batch(collect_items("RetUI")[:1], SETTINGS, "pw")   # one already emailed
     from lmgrader.ui.return_view import ReturnView
@@ -237,3 +238,30 @@ def test_return_view_smoke(qapp, tmp_path):
         v.grab().save(str(SCREENSHOT_DIR / "return.png"))
     finally:
         config.SMTP_CONFIG.update(username="", from_address="")
+
+def test_return_view_without_email(qapp, tmp_path):
+    make_exam(tmp_path, "RetNoMail", ROSTER)
+    assert config.EMAIL_ENABLED is False                      # the shipped default
+    from lmgrader.ui.return_view import ReturnView
+    v = ReturnView()
+    v.resize(1300, 820)
+    v.show()
+    v.cb_exam.setCurrentIndex(v.cb_exam.findText("RetNoMail"))
+    qapp.processEvents()
+    assert v.email_card.isHidden()
+    assert v.table.isColumnHidden(1)
+    assert v.lbl_preview_title.text() == "Feedback PDF"
+    assert v.btn_pdfs.isEnabled() and v.btn_grades_csv.isEnabled()
+    v.table.selectRow(0); qapp.processEvents()
+    assert v.lbl_attach.text().startswith("File: ")
+    SCREENSHOT_DIR.mkdir(exist_ok=True)
+    v.grab().save(str(SCREENSHOT_DIR / "return_no_email.png"))
+
+def test_export_pdfs(tmp_path):
+    make_exam(tmp_path, "RetPdfs", ROSTER)
+    out = tmp_path / "pdfs"
+    files = export_pdfs(collect_items("RetPdfs"), str(out), "{last}_{first}")
+    assert sorted(files) == ["Mail_No.pdf", "Smith_John.pdf", "Torres_Ana.pdf"]
+    assert all((out / f).is_file() for f in files)
+    rows = [r for r in db.list_returns() if r["channel"] == "pdf"]
+    assert len(rows) == 3 and all(r["status"] == "exported" for r in rows)

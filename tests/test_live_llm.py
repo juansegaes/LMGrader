@@ -64,7 +64,7 @@ def question(llm):
 @pytest.fixture(scope="module")
 def rubric(llm, question):
     r = llm.generate_rubric(question, 4, "3")
-    print("\nRUBRIC:\n" + r)
+    print("\nRUBRIC:\n" + r.as_text(4))
     return r
 
 def test_extract_question_latex(question):
@@ -72,8 +72,8 @@ def test_extract_question_latex(question):
     assert "$" in question or "\\(" in question or "\\[" in question
 
 def test_generate_rubric(rubric):
-    assert rubric.startswith("Expected answer:")
-    assert "- [" in rubric
+    assert rubric.expected_answer and rubric.items
+    assert rubric.as_text(4).startswith("Expected answer:") and "- [" in rubric.as_text(4)
 
 def test_grade_correct_answer(llm, question, rubric):
     img = text_img(["(x-2)(x-3) = 0", "x = 2 or x = 3"], 600, 1.3, HAND)

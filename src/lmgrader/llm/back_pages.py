@@ -98,6 +98,7 @@ def grade_with_continuation(llm, front_b64: str, back_b64: str, problem: str, gr
                             strictness: int = 10) -> dict:
     """Like LLMClient.grade_answer, but the second image is the continuation of the answer that
     the student wrote on the back of the page."""
+    rubric = rubric.as_text(max_points) if hasattr(rubric, "as_text") else rubric
     prompt = (
         f"Problem {problem} (section '{group}'). Maximum points: {max_points:g}.\n\n"
         f"Question:\n{question or '(question text not provided; infer it from the image)'}\n\n"

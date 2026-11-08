@@ -2,7 +2,7 @@
 import copy
 import json
 from typing import List, Optional, Tuple
-from ..models import TestTemplate, AnswerRegion
+from ..models import TestTemplate, AnswerRegion, Rubric, new_uid
 from ..db import save_template, load_template, list_templates
 from .alignment import read_image
 from .layout import parse_label, _part_key as part_key
@@ -33,6 +33,7 @@ def duplicate_as_version(src: TestTemplate, image_path, version_label: str, keep
     dropped."""
     t = create_template_from_image(f"{src.exam_name} v{version_label}", image_path,
                                    src.exam_name, version_label)
+    t.course_id = src.course_id
     sx = t.width / src.width if src.width else 1.0
     sy = t.height / src.height if src.height else 1.0
     scale = lambda r: (int(r[0] * sx), int(r[1] * sy), int(r[2] * sx), int(r[3] * sy)) if r else None
@@ -41,10 +42,12 @@ def duplicate_as_version(src: TestTemplate, image_path, version_label: str, keep
             continue
         nr = copy.deepcopy(r)
         nr.id = None
+        nr.uid = new_uid()
         nr.rect = scale(r.rect)
         nr.question_rect = scale(r.question_rect)
         if not keep_text:
-            nr.question_text, nr.rubric, nr.answer_key = "", "", ""
+            nr.question_text, nr.answer_key = "", ""
+            nr.rubric = Rubric(max_points=nr.points)
         t.regions.append(nr)
     if src.name_page < t.page_count:
         t.name_rect, t.name_page = scale(src.name_rect), src.name_page
@@ -109,15 +112,21 @@ def repair_part_json(t: TestTemplate) -> List[str]:
             if stem and me and siblings(t, i)[0] == i and not t.stems.get(me[0], "").strip():
                 t.stems[me[0]] = stem
             changes.append(f"{r.problem}: split a raw model reply")
-        for attr in ("question_text", "rubric"):
-            old = getattr(r, attr)
-            new = repair_latex_text(old)
-            if attr == "question_text" and is_repetitive(new):
-                new = ""
-                changes.append(f"{r.problem}: cleared garbled question text")
-            elif new != old:
-                changes.append(f"{r.problem}: repaired LaTeX")
-            setattr(r, attr, new)
+        old = r.question_text
+        new = repair_latex_text(old)
+        if is_repetitive(new):
+            new = ""
+            changes.append(f"{r.problem}: cleared garbled question text")
+        elif new != old:
+            changes.append(f"{r.problem}: repaired LaTeX")
+        r.question_text = new
+        rub = r.rubric
+        fixed = [repair_latex_text(rub.expected_answer)] + [repair_latex_text(it.description) for it in rub.items]
+        if fixed != [rub.expected_answer] + [it.description for it in rub.items]:
+            rub.expected_answer = fixed[0]
+            for it, d in zip(rub.items, fixed[1:]):
+                it.description = d
+            changes.append(f"{r.problem}: repaired LaTeX")
     for num, stem in list(t.stems.items()):
         new = repair_latex_text(stem)
         if is_repetitive(new):

@@ -1,4 +1,5 @@
-"""Return graded tests: email them (SMTP) or export for an LMS."""
+"""Return graded tests: Canvas upload, grades into the teacher's CSV, feedback PDFs to a folder
+(email via SMTP too when config.EMAIL_ENABLED)."""
 import os
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QCheckBox, QTableWidget,
                              QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QPlainTextEdit,
@@ -6,10 +7,11 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QChec
                              QDialogButtonBox, QScrollArea)
 from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtGui import QColor, QDesktopServices
+from .. import config
 from ..config import SMTP_CONFIG, CANVAS_CONFIG, save_settings
-from ..db import list_exams, was_emailed, was_returned
+from ..db import list_exams, was_emailed, was_returned, current_course
 from ..returns import (collect_items, ensure_pdf, render, send_batch, send_test, get_password, set_password,
-                       keyring_available, export_lms, PRESETS)
+                       keyring_available, export_pdfs)
 from ..returns import canvas
 from ..returns.lms import DEFAULT_PATTERN, filename_for
 from . import theme
@@ -48,8 +50,8 @@ def job_test(settings, password, to_addr, item, worker=None):
     send_test(settings, password, to_addr, item)
     return to_addr
 
-def job_lms(exam, out_dir, preset, pattern, items, worker=None):
-    return export_lms(exam, out_dir, preset, pattern, items=items, progress=worker.progress.emit)
+def job_pdfs(out_dir, pattern, items, worker=None):
+    return export_pdfs(items, out_dir, pattern, progress=worker.progress.emit)
 
 def job_canvas_courses(url, token, worker=None):
     worker.progress.emit(0, 0, "Connecting to Canvas…")
@@ -72,8 +74,11 @@ def job_canvas_upload(url, token, course_id, assignment_id, comment, matches, re
 class ReturnView(QWidget):
     def __init__(self):
         super().__init__()
-        body, actions = setup_page(self, "Return",
-                                   "Send each student their annotated test by email, or export it for your LMS.")
+        self.email_on = config.EMAIL_ENABLED
+        subtitle = ("Send each student their annotated test by email, or export it for your LMS." if self.email_on
+                    else "Upload each student's annotated test to Canvas, write the grades into your own CSV, "
+                         "or export the feedback PDFs.")
+        body, actions = setup_page(self, "Return", subtitle)
         self.items = []
         self.worker = None
 
@@ -115,7 +120,8 @@ class ReturnView(QWidget):
         # preview
         pc, pl = card()
         prow = QHBoxLayout()
-        prow.addWidget(label("Email preview", "sectionTitle")); prow.addStretch()
+        self.lbl_preview_title = label("Email preview" if self.email_on else "Feedback PDF", "sectionTitle")
+        prow.addWidget(self.lbl_preview_title); prow.addStretch()
         self.btn_pdf = button("Open PDF", "ghost")
         prow.addWidget(self.btn_pdf)
         pl.addLayout(prow)
@@ -126,6 +132,9 @@ class ReturnView(QWidget):
         self.lbl_attach = label("", "muted")
         for w in (self.lbl_to, self.lbl_subject, self.preview, self.lbl_attach):
             pl.addWidget(w)
+        if not self.email_on:
+            for w in (self.lbl_to, self.lbl_subject, self.preview):
+                w.setVisible(False)
         rl.addWidget(pc)
 
         # Canvas: feedback PDF as a submission comment (grades untouched)
@@ -161,8 +170,21 @@ class ReturnView(QWidget):
         cl.addLayout(crow)
         rl.addWidget(cc)
 
-        # email
+        # grades into the teacher's own CSV
+        gc, gl = card()
+        gl.addWidget(label("Grades into your CSV", "sectionTitle"))
+        self.lbl_grades_help = label("Write each student's total into a column of a CSV you already have "
+                                     "(e.g. your Canvas or Banner gradebook export). You pick the column and how "
+                                     "names are written; a new file is saved.", "muted")
+        self.lbl_grades_help.setWordWrap(True)
+        gl.addWidget(self.lbl_grades_help)
+        self.btn_grades_csv = button("Write grades into a CSV…", "primary")
+        gl.addWidget(self.btn_grades_csv)
+        rl.addWidget(gc)
+
+        # email (off for now: config.EMAIL_ENABLED)
         ec, el = card()
+        self.email_card = ec
         el.addWidget(label("Email", "sectionTitle"))
         self.lbl_smtp = label("", "muted"); self.lbl_smtp.setWordWrap(True)
         el.addWidget(self.lbl_smtp)
@@ -173,32 +195,32 @@ class ReturnView(QWidget):
         for b in (self.btn_test, self.btn_send_sel, self.btn_send_all):
             r1.addWidget(b)
         el.addLayout(r1)
-        r2 = QHBoxLayout()
-        self.progress = QProgressBar(); self.progress.setVisible(False)
-        self.btn_stop = button("Stop", "danger"); self.btn_stop.setVisible(False)
-        r2.addWidget(self.progress, 1); r2.addWidget(self.btn_stop)
-        el.addLayout(r2)
-        self.lbl_status = label("", "muted"); self.lbl_status.setWordWrap(True)
-        el.addWidget(self.lbl_status)
         rl.addWidget(ec)
 
-        # LMS
-        lc, ll = card()
-        ll.addWidget(label("LMS upload", "sectionTitle"))
+        # feedback PDFs to a folder
+        pc2, pl2 = card()
+        pl2.addWidget(label("Feedback PDFs", "sectionTitle"))
         form = QFormLayout()
-        self.cb_preset = QComboBox()
-        for k, v in PRESETS.items():
-            self.cb_preset.addItem(v, k)
         self.in_pattern = QLineEdit(DEFAULT_PATTERN)
         self.in_pattern.setToolTip("Placeholders: {student_id} {first} {last} {name} {exam} {version} {sub_id}")
-        form.addRow("Format", self.cb_preset)
         form.addRow("File names", self.in_pattern)
-        ll.addLayout(form)
-        self.lbl_lms_help = label("", "muted"); self.lbl_lms_help.setWordWrap(True)
-        ll.addWidget(self.lbl_lms_help)
-        self.btn_lms = button("Export ZIP…", "primary")
-        ll.addWidget(self.btn_lms)
-        rl.addWidget(lc)
+        pl2.addLayout(form)
+        self.lbl_pdfs_help = label("One PDF per student (the summary page plus their scans with red boxes) in "
+                                   "the folder you pick, named with the pattern.", "muted")
+        self.lbl_pdfs_help.setWordWrap(True)
+        pl2.addWidget(self.lbl_pdfs_help)
+        self.btn_pdfs = button("Export PDFs to folder…", "primary")
+        pl2.addWidget(self.btn_pdfs)
+        rl.addWidget(pc2)
+
+        # progress + status (used by Canvas, PDF and email jobs)
+        srow = QHBoxLayout()
+        self.progress = QProgressBar(); self.progress.setVisible(False)
+        self.btn_stop = button("Stop", "danger"); self.btn_stop.setVisible(False)
+        srow.addWidget(self.progress, 1); srow.addWidget(self.btn_stop)
+        rl.addLayout(srow)
+        self.lbl_status = label("", "muted"); self.lbl_status.setWordWrap(True)
+        rl.addWidget(self.lbl_status)
         rl.addStretch()
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(right)
@@ -215,23 +237,36 @@ class ReturnView(QWidget):
         self.btn_send_sel.clicked.connect(lambda: self.send(selected_only=True))
         self.btn_send_all.clicked.connect(lambda: self.send(selected_only=False))
         self.btn_stop.clicked.connect(self.stop)
-        self.btn_lms.clicked.connect(self.export_lms)
-        self.cb_preset.currentIndexChanged.connect(self._preset_changed)
+        self.btn_pdfs.clicked.connect(self.export_pdfs)
+        self.btn_grades_csv.clicked.connect(self.export_grades_csv)
         self.btn_canvas_connect.clicked.connect(self.canvas_connect)
         self.btn_canvas_forget.clicked.connect(self.canvas_forget)
         self.cb_course.activated.connect(lambda _: self.canvas_load_assignments())
         self.cb_assignment.activated.connect(lambda _: self._canvas_remember())
         self.btn_canvas_sel.clicked.connect(lambda: self.canvas_upload(selected_only=True))
         self.btn_canvas_all.clicked.connect(lambda: self.canvas_upload(selected_only=False))
-        self._preset_changed()
+        if not self.email_on:
+            self.table.setColumnHidden(COL_EMAIL, True)
+            self.email_card.setVisible(False)
         self.refresh()
 
     # ---------- data ----------
+    def context(self):
+        """(exam, version id) for the other tabs (Return works on a whole exam)."""
+        return self.cb_exam.currentText() or None, None
+
+    def set_context(self, exam, tid=None):
+        """Show this exam at the next refresh."""
+        if exam:
+            self._want_exam = exam
+
     def refresh(self):
-        cur = self.cb_exam.currentText()
+        want, self._want_exam = getattr(self, "_want_exam", None), None
+        exams = list_exams()
+        cur = want if want in exams else self.cb_exam.currentText()
         self.cb_exam.blockSignals(True)
         self.cb_exam.clear()
-        self.cb_exam.addItems(list_exams())
+        self.cb_exam.addItems(exams)
         if cur:
             i = self.cb_exam.findText(cur)
             if i >= 0:
@@ -258,7 +293,8 @@ class ReturnView(QWidget):
             self.table.insertRow(r)
             self._fill_row(r, it)
         no_email = sum(1 for it in self.items if not it.email)
-        self.lbl_count.setText(f"{len(self.items)} tests" + (f" · {no_email} without email" if no_email else ""))
+        self.lbl_count.setText(f"{len(self.items)} tests" + (f" · {no_email} without email"
+                                                             if no_email and self.email_on else ""))
         if self.items:
             self.table.selectRow(0)
         else:
@@ -284,7 +320,8 @@ class ReturnView(QWidget):
             how = "Canvas" if last["channel"] == "canvas" else "emailed"
             txt, color = f"{how} {last['sent_at'].replace('T', ' ')[:16]}", theme.OK
         elif last["status"] == "exported":
-            txt, color = f"LMS export {last['sent_at'][:10]}", theme.ACCENT
+            what = "PDF export" if last["channel"] == "pdf" else "LMS export"
+            txt, color = f"{what} {last['sent_at'][:10]}", theme.ACCENT
         else:
             txt, color = f"{last['status']}: {last['error'][:40]}", theme.DANGER
         ri = QTableWidgetItem(txt); ri.setForeground(QColor(color))
@@ -310,7 +347,7 @@ class ReturnView(QWidget):
         self.lbl_subject.setText(render(SMTP_CONFIG.get("subject", ""), it))
         self.preview.setPlainText(render(SMTP_CONFIG.get("body", ""), it))
         from ..returns.items import pdf_name
-        self.lbl_attach.setText(f"Attachment: {pdf_name(it)}")
+        self.lbl_attach.setText(f"Attachment: {pdf_name(it)}" if self.email_on else f"File: {pdf_name(it)}")
         self._update_enabled()
 
     def open_pdf(self):
@@ -326,7 +363,7 @@ class ReturnView(QWidget):
     def _update_enabled(self):
         busy = self.worker is not None
         has = bool(self.items)
-        for b in (self.btn_test, self.btn_send_all, self.btn_lms):
+        for b in (self.btn_test, self.btn_send_all, self.btn_pdfs, self.btn_grades_csv):
             b.setEnabled(not busy and has)
         self.btn_send_sel.setEnabled(not busy and bool(self._selected()))
         self.btn_pdf.setEnabled(bool(self._selected()))
@@ -335,18 +372,6 @@ class ReturnView(QWidget):
         self.btn_canvas_sel.setEnabled(not busy and target and bool(self._selected()))
         for w in (self.cb_exam, self.chk_review, self.btn_canvas_connect, self.cb_course, self.cb_assignment):
             w.setEnabled(not busy)
-
-    def _preset_changed(self):
-        preset = self.cb_preset.currentData()
-        self.in_pattern.setEnabled(preset == "generic")
-        self.lbl_lms_help.setText({
-            "generic": "A ZIP with one PDF per student (named with the pattern) and grades.csv.",
-            "canvas": "Import the CSV in Gradebook → Import. Canvas has no bulk feedback-file upload: "
-                      "attach each PDF (named by SIS id) in SpeedGrader.",
-            "moodle": "Upload the ZIP via Assignment → View all submissions → Upload multiple feedback files "
-                      "in a zip. Moodle matches folders by its participant id; the roster's student_id is used, "
-                      "so you may need Moodle's grading worksheet to map ids.",
-        }[preset])
 
     # ---------- email ----------
     def _smtp_ready(self) -> bool:
@@ -480,10 +505,19 @@ class ReturnView(QWidget):
                                 f"Connected. {len(courses)} course(s).")
         if not courses:
             self._update_enabled(); return
-        t = CANVAS_CONFIG.get("targets", {}).get(self.cb_exam.currentText())
+        t = self._canvas_target(self.cb_exam.currentText())
         i = self.cb_course.findData(t["course_id"]) if t else -1
         self.cb_course.setCurrentIndex(max(0, i))
         self.canvas_load_assignments()
+
+    @staticmethod
+    def _canvas_key(exam: str) -> str:
+        """Canvas course + assignment are remembered per LMGrader course and exam."""
+        return f"{current_course()}:{exam}"
+
+    def _canvas_target(self, exam: str):
+        targets = CANVAS_CONFIG.get("targets", {})
+        return targets.get(self._canvas_key(exam)) or targets.get(exam)    # (plain name: saved before courses)
 
     def canvas_load_assignments(self):
         cid = self.cb_course.currentData()
@@ -510,7 +544,7 @@ class ReturnView(QWidget):
         if not hasattr(self, "cb_assignment") or self.cb_assignment.count() == 0:
             return
         exam = self.cb_exam.currentText()
-        t = CANVAS_CONFIG.get("targets", {}).get(exam)
+        t = self._canvas_target(exam)
         if t and t["course_id"] != self.cb_course.currentData():
             i = self.cb_course.findData(t["course_id"])
             if i >= 0:
@@ -527,7 +561,7 @@ class ReturnView(QWidget):
     def _canvas_remember(self):
         cid, aid, exam = self.cb_course.currentData(), self.cb_assignment.currentData(), self.cb_exam.currentText()
         if cid is not None and aid is not None and exam:
-            CANVAS_CONFIG.setdefault("targets", {})[exam] = {"course_id": cid, "assignment_id": aid}
+            CANVAS_CONFIG.setdefault("targets", {})[self._canvas_key(exam)] = {"course_id": cid, "assignment_id": aid}
             save_settings()
         self._update_enabled()
 
@@ -592,27 +626,31 @@ class ReturnView(QWidget):
             QMessageBox.warning(self, "Canvas", txt + "\n\n" + "\n".join(
                 f"{r['recipient']}: {r['error']}" for r in failed[:10]))
 
-    # ---------- LMS ----------
-    def export_lms(self):
+    # ---------- feedback PDFs / grades CSV ----------
+    def export_pdfs(self):
         if not self.items:
             return
-        out = QFileDialog.getExistingDirectory(self, "Export to folder")
+        out = QFileDialog.getExistingDirectory(self, "Export feedback PDFs to folder")
         if not out:
             return
-        preset = self.cb_preset.currentData()
-        w = Worker(job_lms, self.cb_exam.currentText(), out, preset, self.in_pattern.text().strip() or DEFAULT_PATTERN,
-                   list(self.items))
-        w.done.connect(lambda res: self._lms_done(res, out))
+        w = Worker(job_pdfs, out, self.in_pattern.text().strip() or DEFAULT_PATTERN, list(self.items))
+        w.done.connect(lambda files: self._pdfs_done(files, out))
         self._start(w)
 
-    def _lms_done(self, res, out):
-        self.lbl_status.setText(f"Exported {len(res['files'])} PDFs to {os.path.basename(res['zip'])}.")
+    def _pdfs_done(self, files, out):
+        self.lbl_status.setText(f"Exported {len(files)} PDFs to {out}.")
         for r in range(len(self.items)):
             self._fill_row(r, self.items[r])
-        note = "\n\n".join(res["warnings"])
-        if QMessageBox.question(self, "Exported", f"Wrote:\n{res['zip']}\n{res['csv']}"
-                                + (f"\n\n{note}" if note else "") + "\n\nOpen the folder?") == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Exported", f"Exported {len(files)} PDFs to:\n{out}\n\n"
+                               "Open the folder?") == QMessageBox.StandardButton.Yes:
             QDesktopServices.openUrl(QUrl.fromLocalFile(out))
+
+    def export_grades_csv(self):
+        if not self.items:
+            return
+        from .csv_dialogs import write_grades_csv     # (module written separately; do NOT create it)
+        if write_grades_csv(self, self.cb_exam.currentText(), list(self.items)):
+            self.lbl_status.setText("Grades written to the CSV.")
 
     # ---------- worker plumbing ----------
     def _start(self, w):

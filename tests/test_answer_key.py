@@ -57,6 +57,10 @@ def test_parse():
             parse_answer_key(bad)
 
 
+def items(region):
+    return [(i.points, i.description) for i in region.rubric.items]
+
+
 def test_apply(tmp_path):
     t = _template(tmp_path, "Key apply")
     t.regions[3].question_text, t.regions[3].rubric = "old OCR text", "- [1 pt] old"   # Q3: replaced
@@ -65,22 +69,23 @@ def test_apply(tmp_path):
     a, b, tf, mc, bonus = t.regions
     assert rep.matched == ["Q1 (a)", "Q1 (b)", "Q2", "Q3"] and rep.no_box == ["4"] and rep.no_key == ["Bonus"]
     assert t.stems == {"1": KEY["questions"][0]["stem"]}
-    assert a.question_text == "Compute $A^{-1}$." and a.points == 3 and a.rubric.startswith("Expected answer:")
-    assert "- [1 pt] $\\det A = -2$" in a.rubric and "- [2 pt] correct inverse" in a.rubric
-    assert b.points == 3 and b.answer_key == "$x=(-2, 3/2)$" and b.rubric == "" and b.grading_notes
+    assert a.question_text == "Compute $A^{-1}$." and a.points == 3 and a.rubric.as_text().startswith("Expected answer:")
+    assert items(a) == [(1, r"$\det A = -2$"), (2, "correct inverse")]
+    assert b.points == 3 and b.answer_key == "$x=(-2, 3/2)$" and not b.rubric and b.grading_notes
     assert "Main question 1" in question_context(t, 1)
-    assert tf.rubric == ("Expected answer: False\n\nCriteria:\n"
-                         "- [2 pt] Answers False (all or nothing: no partial credit)")
-    assert "(B)" in mc.rubric and rep.rubrics_from_key == ["Q1 (a)", "Q2", "Q3"]
-    assert rep.replaced == ["Q3"] and bonus.rubric == "- [5 pt] kept"
-    # re-importing the same key changes nothing; an LLM rubric written for the same text survives
+    assert tf.rubric.as_text() == ("Expected answer: False\n\nCriteria:\n"
+                                   "- [2 pt] Answers False (all or nothing: no partial credit)")
+    assert "(B)" in mc.rubric.as_text() and rep.rubrics_from_key == ["Q1 (a)", "Q2", "Q3"]
+    assert rep.replaced == ["Q3"] and items(bonus) == [(5, "kept")]
+    # re-importing the same key changes nothing (item ids too); an LLM rubric for the same text survives
+    ids = [i.id for i in a.rubric.items]
     b.rubric = "- [3 pt] llm rubric"
     rep2 = apply_answer_key(t, parse_answer_key(KEY))
-    assert b.rubric == "- [3 pt] llm rubric" and not rep2.replaced
+    assert items(b) == [(3, "llm rubric")] and not rep2.replaced and [i.id for i in a.rubric.items] == ids
     # a key with a new answer makes that rubric stale
     k = json.loads(json.dumps(KEY)); k["questions"][0]["parts"][1]["answer"] = "$x=0$"
     apply_answer_key(t, parse_answer_key(k))
-    assert b.rubric == ""
+    assert not b.rubric
     # persisted with the template
     t.id = persist(t)
     assert db.load_template(t.id).regions[1].answer_key == "$x=0$"
@@ -92,7 +97,7 @@ def test_apply_without_rubrics(tmp_path):
     t.regions[2].rubric = "- [2 pt] old, for other text"
     rep = apply_answer_key(t, parse_answer_key(KEY), rubrics=False)
     a, b, tf, mc, _ = t.regions
-    assert not rep.rubrics_from_key and all(r.rubric == "" for r in (a, b, tf, mc))   # stale one cleared
+    assert not rep.rubrics_from_key and not any(r.rubric for r in (a, b, tf, mc))   # stale one cleared
     assert a.points == 3 and a.answer_key and tf.answer_key == "False" and a.question_text
 
 
@@ -113,7 +118,7 @@ def test_apply_replace(tmp_path):
     assert rep.notes_cleared == ["Q1 (b)", "Bonus"] and rep.answers_cleared == ["Q3", "Bonus"]
     assert b.grading_notes == "" and bonus.grading_notes == "" and bonus.answer_key == ""
     assert mc.answer_key == ""
-    assert b.answer_key == "$x=(-2, 3/2)$" and b.rubric == "- [3 pt] llm rubric"   # same answer: rubric kept
+    assert b.answer_key == "$x=(-2, 3/2)$" and items(b) == [(3, "llm rubric")]   # same answer: rubric kept
     assert "Notes removed (not in the key): Q1 (b), Bonus" in rep.summary()
 
 
@@ -123,10 +128,13 @@ def test_skill_example_is_valid():
     assert text.startswith("---\nname: lmgrader-answer-key\n")
     example = re.search(r"```json\n(.*?)```", text, re.S).group(1)
     key = parse_answer_key(example)
-    assert [it.label for it in key.items] == ["1a", "1b", "2", "3"]
+    assert [it.label for it in key.items] == ["1a", "1b", "2", "3", "4"]
     assert key.items[0].points == 4 and key.items[2].type == "true_false"
     assert all(it.rubric for it in key.items if it.type == "open")       # the example follows step 4
-    assert all(sum(p for p, _ in it.rubric) == it.points for it in key.items if it.rubric)
+    assert all(sum(p for p, _ in it.rubric) == it.points for it in key.items if it.rubric and it.scoring == "positive")
+    neg = [it for it in key.items if it.scoring == "negative"]           # a deductions example too
+    assert neg and all(p < 0 for it in neg for p, _ in it.rubric)
+    assert '"version": 2' in example and '"criterion"' not in example
     assert "Check every computable answer with Python" in text and "sympy" in text.lower()
 
 
@@ -153,6 +161,24 @@ def test_rubric_uses_answer_key():
     assert "answer key for this question:\n$x=(-2, 3/2)$" in sent[-1] and "First solve" not in sent[-1]
     c.generate_rubric("Solve $Ax=b$.", 3, "1b")
     assert "answer key" not in sent[-1] and "First solve" in sent[-1]
+
+
+def test_rubric_prompt_follows_the_notes_for_the_grader():
+    from lmgrader.llm.client import LLMClient
+    c = LLMClient.__new__(LLMClient)
+    sent = []
+    c._chat = lambda m, *a, **k: (sent.append(m[1]["content"]),
+                                  '{"expected_answer": "x", "criteria": [{"description": "x", "points": 3}]}')[1]
+    c.generate_rubric("True or false: $2>1$.", 3, "4", notes="Give 1 point for a right justification.")
+    p = sent[-1]
+    assert "Professor's notes for this question:\nGive 1 point for a right justification." in p
+    assert "The professor's notes for this question above come first" in p
+    # said after the default rules (e.g. true/false all-or-nothing), so the notes win
+    assert p.index("come first") > p.index("NO partial credit")
+    c.generate_rubric("Q", 3, "4", instructions="Units required.", notes="Accept degrees.")
+    assert "The professor's instructions and notes for this question above come first" in sent[-1]
+    c.generate_rubric("Q", 3, "4")
+    assert "come first" not in sent[-1]
 
 
 class KeyLLM(FakeLLM):
@@ -221,7 +247,7 @@ def test_editor_import(qapp, tmp_path, monkeypatch):
         assert not any(r.rubric for r in tv.t.regions) and tv.t.regions[0].question_text
         choice[0] = True
         tv.import_answer_key(str(f))
-        assert tv.t.regions[0].rubric.startswith("Expected answer:") and not tv.t.regions[1].rubric
+        assert tv.t.regions[0].rubric.as_text().startswith("Expected answer:") and not tv.t.regions[1].rubric
         assert tv.current_instructions() == KEY["instructions"]
         tv.flush()
         saved = db.load_template(t.id)
@@ -233,7 +259,7 @@ def test_editor_import(qapp, tmp_path, monkeypatch):
         assert llm.keys == {"Q1 (b)": "$x=(-2, 3/2)$", "Bonus": ""}
         tv.region_list.setCurrentRow(1); qapp.processEvents()
         assert tv.lbl_answer_key.isVisibleTo(tv) and "$x=(-2, 3/2)$" in tv.lbl_answer_key.text()
-        assert tv.in_rubric.toPlainText() == "- [3 pt] from key"
+        assert [(i.points, i.description) for i in tv.rubric_editor.rubric().items] == [(3, "from key")]
         SCREENSHOT_DIR.mkdir(exist_ok=True)
         mw.grab().save(str(SCREENSHOT_DIR / "template_editor_answer_key.png"))
     finally:

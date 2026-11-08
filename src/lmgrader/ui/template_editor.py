@@ -18,24 +18,27 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, QL
                              QFileDialog, QMessageBox, QInputDialog, QFormLayout, QLineEdit,
                              QDoubleSpinBox, QPlainTextEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QButtonGroup, QProgressBar, QScrollArea, QComboBox, QCheckBox, QFrame,
-                             QDialog, QDialogButtonBox)
+                             QDialog, QDialogButtonBox, QLabel)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut, QColor
 
 from ..db import (list_templates, load_template, delete_template, list_versions,
                   get_exam_instructions, set_exam_instructions, get_exam_strictness, set_exam_strictness,
-                  list_submissions)
+                  list_submissions, count_region_grades, count_template_grades, current_course, list_courses,
+                  course_name, copy_exam, move_exam, exam_test_count)
 from ..template.template import (create_template_from_image, add_region, persist, duplicate_as_version,
                                  part_of, siblings, question_context, repair_part_json)
 from ..template.alignment import read_image, crop_region
 from ..scanner.image_input import import_pages, IMAGE_FILTER
-from ..models import TestTemplate, AnswerRegion, BLANK, double_sided_layout, SUB_GRADED
+from ..models import TestTemplate, AnswerRegion, BLANK, double_sided_layout, SUB_GRADED, SUB_GRADING
+from ..template.layout import parse_label, _part_key
+from .rubric_editor import RubricEditor
 from ..llm.client import (LLMClient, image_to_b64, prepare_crop, downscale_for_llm, STRICTNESS_NAMES,
                           STRICTNESS_TEXT)
 from ..template.layout import refine_layout, iou
 from ..template.answer_key import load_answer_key, apply_answer_key, SKILL_PATH
 from ..template.tex_import import load_tex
-from ..config import CROP_PADDING, LLM_CONFIG, DEFAULT_POINTS, STRICTNESS_MIN, STRICTNESS_MAX
+from ..config import CROP_PADDING, LLM_CONFIG, DEFAULT_POINTS, STRICTNESS_MIN, STRICTNESS_MAX, llm_enabled
 from . import theme
 from .theme import button, card, label, setup_page
 from .widgets import PageViewer, Overlay, Worker
@@ -299,18 +302,22 @@ def job_layout(page_paths, existing, replace, columns=0, worker=None):
     return result
 
 STEPS = ["Detect regions & questions", "Check boxes, set points", "Generate rubrics", "Check rubrics"]
+STEPS_NO_LLM = ["Draw answer boxes", "Set points", "Write rubrics", "Check rubrics"]
+SUBTITLE = ("Upload the blank exam, let the LLM find the questions, check the boxes and points, then "
+            "generate rubrics. Everything is saved automatically.")
+SUBTITLE_NO_LLM = ("Upload the blank exam, draw the answer boxes and the name field, set the points and "
+                   "write the rubrics (or import them). Everything is saved automatically.")
 
 class TemplateEditorView(QWidget):
     def __init__(self):
         super().__init__()
-        body, actions = setup_page(self, "Exams & Templates",
-                                   "Upload the blank exam, let the LLM find the questions, check the boxes and "
-                                   "points, then generate rubrics. Everything is saved automatically.")
+        body, actions = setup_page(self, "Exams & Templates", SUBTITLE)
         self.t: Optional[TestTemplate] = None
         self.t_img = None            # image of the current page
         self.page = 0
         self._page_imgs: Dict[str, object] = {}
         self.sel: Optional[int] = None
+        self._redraw_uid: Optional[str] = None   # "Redraw box": the question whose new answer box is drawn next
         self.dirty = False
         self._loading = False
         self._copy_src_available = False
@@ -339,14 +346,20 @@ class TemplateEditorView(QWidget):
         self.btn_new_exam = button("New exam…", "primary",
                                    "Pick the blank exam: a (multi-page) PDF or one image per page, in order")
         self.btn_add_version = button("Add version…", tooltip="Add another version (A, B, C…) of the selected exam")
+        self.btn_exam_course = button("Copy / move to course…", "ghost",
+                                      "Copy the selected exam to another course (e.g. another section giving the "
+                                      "same test), or move it there with its scanned tests")
         self.btn_del_version = button("Delete version", "danger")
-        for b in (self.btn_new_exam, self.btn_add_version, self.btn_del_version):
+        for b in (self.btn_new_exam, self.btn_add_version, self.btn_exam_course, self.btn_del_version):
             ll.addWidget(b)
-        ll.addSpacing(6)
-        ll.addWidget(label("Grading instructions", "sectionTitle"))
+        # AI-only settings of the exam (hidden when Settings → "Use an LLM" is off)
+        self.ai_box = QWidget()
+        al = QVBoxLayout(self.ai_box); al.setContentsMargins(0, 6, 0, 0); al.setSpacing(ll.spacing())
+        ll.addWidget(self.ai_box)
+        al.addWidget(label("Grading instructions", "sectionTitle"))
         self.lbl_instr_scope = label("Whole exam: every version and question.", "muted")
         self.lbl_instr_scope.setWordWrap(True)
-        ll.addWidget(self.lbl_instr_scope)
+        al.addWidget(self.lbl_instr_scope)
         srow = QHBoxLayout()
         srow.addWidget(label("Strictness"))
         self.cb_strictness = QComboBox()
@@ -358,7 +371,7 @@ class TemplateEditorView(QWidget):
                                       "10 follows the rubric strictly, 5 is very generous. Your instructions "
                                       "below always take priority.")
         srow.addWidget(self.cb_strictness, 1)
-        ll.addLayout(srow)
+        al.addLayout(srow)
         self.in_instructions = QPlainTextEdit()
         self.in_instructions.setPlaceholderText(
             "e.g. Make sure all work is shown; drop points for answers without supporting work.")
@@ -366,12 +379,12 @@ class TemplateEditorView(QWidget):
                                         "generating rubrics.")
         self.in_instructions.setMinimumHeight(70)
         self.in_instructions.setMaximumHeight(130)
-        ll.addWidget(self.in_instructions)
+        al.addWidget(self.in_instructions)
         self.lbl_instr_hint = label("", "muted")
         self.lbl_instr_hint.setWordWrap(True)
         self.lbl_instr_hint.setStyleSheet(f"color: {theme.WARN};")
         self.lbl_instr_hint.setVisible(False)
-        ll.addWidget(self.lbl_instr_hint)
+        al.addWidget(self.lbl_instr_hint)
         self._instr_exam: Optional[str] = None
         self._instr_dirty = False
         self._instr_timer = QTimer(self)
@@ -392,7 +405,8 @@ class TemplateEditorView(QWidget):
         self.btn_layout = button("Edit…", "ghost", "Insert or remove blank pages anywhere in the scanned order")
         lrow.addWidget(self.btn_layout)
         ll.addLayout(lrow)
-        crow = QHBoxLayout()
+        self.columns_box = QWidget()      # only helps the LLM find the regions
+        crow = QHBoxLayout(self.columns_box); crow.setContentsMargins(0, 0, 0, 0)
         crow.addWidget(label("Question columns"))
         self.cb_columns = QComboBox()
         self.cb_columns.addItem("Auto", 0)
@@ -401,7 +415,7 @@ class TemplateEditorView(QWidget):
         self.cb_columns.setToolTip("Optional: how many columns of questions the pages have. Helps the LLM "
                                    "find the regions and number them column by column.")
         crow.addWidget(self.cb_columns); crow.addStretch()
-        ll.addLayout(crow)
+        ll.addWidget(self.columns_box)
         left.setMinimumWidth(230)
         split.addWidget(left)
 
@@ -481,7 +495,8 @@ class TemplateEditorView(QWidget):
         msg.setWordWrap(True)
         bl.addWidget(msg)
         brow = QHBoxLayout()
-        self.btn_continue_latex = button("Continue: read questions (LaTeX)", "primary")
+        # short text: with "Not now" beside it the row must fit the panel's minimum width
+        self.btn_continue_latex = button("Read questions (LaTeX)", "primary")
         self.btn_not_now = button("Not now", "ghost")
         brow.addWidget(self.btn_continue_latex); brow.addWidget(self.btn_not_now); brow.addStretch()
         bl.addLayout(brow)
@@ -492,14 +507,34 @@ class TemplateEditorView(QWidget):
         self.region_list.setMinimumHeight(120)
         self.region_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.region_list.setWordWrap(True)
+        self.region_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.region_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.region_list.setToolTip("Questions in grading and feedback order. Drag one to move it.")
+        self.region_list.model().rowsMoved.connect(lambda *_: self._regions_dragged())
         rl.addWidget(self.region_list, 1)
         rrow = QHBoxLayout()
-        self.btn_del_region = button("Delete region", "danger")
+        self.btn_region_up = button("↑", tooltip="Move the selected question up (or drag it in the list)")
+        self.btn_region_down = button("↓", tooltip="Move the selected question down (or drag it in the list)")
+        for b in (self.btn_region_up, self.btn_region_down):
+            b.setFixedWidth(40)
+        self.btn_sort_regions = button("Sort by number", "ghost",
+                                       "Put the questions in the order of their numbers: 1, 2a, 2b, 3… "
+                                       "(questions without a number keep their place at the end)")
+        self.btn_del_region = button("Delete", "danger",
+                                     "Delete the selected question with its box, points, question and rubric (Del)")
+        rrow.addWidget(self.btn_region_up); rrow.addWidget(self.btn_region_down)
+        rrow.addWidget(self.btn_sort_regions); rrow.addStretch(); rrow.addWidget(self.btn_del_region)
+        rl.addLayout(rrow)
+        crow2 = QHBoxLayout()
+        self.btn_redraw_box = button("Redraw box", "ghost",
+                                     "The selected question's answer box is wrong: remove it and drag a new one "
+                                     "on any page. Its points, question and rubric stay.")
+        self.btn_redraw_box.setCheckable(True)
         self.btn_copy_boxes = button("Copy boxes from another version", "ghost",
                                      "Start this version with the boxes, points and name/ID fields of another "
                                      "version of the same exam")
-        rrow.addWidget(self.btn_del_region); rrow.addStretch(); rrow.addWidget(self.btn_copy_boxes)
-        rl.addLayout(rrow)
+        crow2.addWidget(self.btn_redraw_box); crow2.addStretch(); crow2.addWidget(self.btn_copy_boxes)
+        rl.addLayout(crow2)
         krow = QHBoxLayout()
         self.btn_import_key = button("Import answer key…", "ghost",
                                      "Questions (LaTeX), points, answers and rubrics from a JSON answer key "
@@ -555,18 +590,21 @@ class TemplateEditorView(QWidget):
         self.in_question.setPlaceholderText("Draw a question area (or the answer box is used), then Extract — or type the question.")
         rl.addWidget(self.in_question, 1)
 
-        rl.addWidget(label("Notes for the grader", "sectionTitle"))
+        self.notes_box = QWidget()        # notes for the AI grader (hidden without an LLM)
+        nl = QVBoxLayout(self.notes_box); nl.setContentsMargins(0, 0, 0, 0); nl.setSpacing(rl.spacing())
+        nl.addWidget(label("Notes for the grader", "sectionTitle"))
         self.in_notes = QPlainTextEdit()
         self.in_notes.setPlaceholderText("Only for this question, e.g. accept answers in degrees or radians.")
         self.in_notes.setToolTip("Added to the grading prompt for this question and used when generating its rubric.")
         self.in_notes.setMinimumHeight(56)
         self.in_notes.setMaximumHeight(80)
-        rl.addWidget(self.in_notes)
+        nl.addWidget(self.in_notes)
+        rl.addWidget(self.notes_box)
 
         rbrow = QHBoxLayout()
         rbrow.addWidget(label("Rubric", "sectionTitle")); rbrow.addStretch()
         self.btn_rubric = button("Generate with LLM", "ghost",
-                                 "The LLM writes a rubric from the fixed question and max points.")
+                                 "The LLM writes the rubric items from the fixed question and max points.")
         rbrow.addWidget(self.btn_rubric)
         rl.addLayout(rbrow)
         self.lbl_answer_key = label("", "muted")
@@ -574,9 +612,9 @@ class TemplateEditorView(QWidget):
         self.lbl_answer_key.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.lbl_answer_key.setVisible(False)
         rl.addWidget(self.lbl_answer_key)
-        self.in_rubric = QPlainTextEdit()
-        self.in_rubric.setPlaceholderText("Type a rubric, or generate one from the question and max points.")
-        rl.addWidget(self.in_rubric, 1)
+        self.rubric_editor = RubricEditor()
+        self.rubric_editor.setToolTip("")
+        rl.addWidget(self.rubric_editor, 1)
 
         self.btn_extract_all = button("Extract all missing questions",
                                       tooltip="Transcribe every region without LaTeX")
@@ -597,7 +635,7 @@ class TemplateEditorView(QWidget):
         self.ai_status.setWordWrap(True)
         rl.addWidget(self.ai_status)
         self.in_question.setMinimumHeight(90)
-        self.in_rubric.setMinimumHeight(110)
+        self.rubric_editor.setMinimumHeight(300)
         # scrollable so the form keeps its natural size on small screens
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
@@ -610,6 +648,7 @@ class TemplateEditorView(QWidget):
         # ---- signals ----
         self.btn_new_exam.clicked.connect(self.new_exam)
         self.btn_add_version.clicked.connect(self.add_version)
+        self.btn_exam_course.clicked.connect(self.exam_to_course)
         self.btn_del_version.clicked.connect(self.delete_version)
         self.tree.itemClicked.connect(self.on_tree_clicked)
         self.mode_group.idClicked.connect(self.on_mode_changed)
@@ -622,6 +661,12 @@ class TemplateEditorView(QWidget):
         self.in_stem.textChanged.connect(self._stem_edited)
         self.region_list.currentRowChanged.connect(self.select_region)
         self.btn_del_region.clicked.connect(self.delete_region)
+        self.btn_redraw_box.clicked.connect(lambda on: self.redraw_box() if on else self.cancel_redraw())
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.cancel_redraw,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.btn_region_up.clicked.connect(lambda: self.move_region(-1))
+        self.btn_region_down.clicked.connect(lambda: self.move_region(1))
+        self.btn_sort_regions.clicked.connect(self.sort_regions)
         QShortcut(QKeySequence.StandardKey.Delete, self.region_list, activated=self.delete_region,
                   context=Qt.ShortcutContext.WidgetShortcut)
         QShortcut(QKeySequence.StandardKey.Save, self, activated=lambda: self.save(),
@@ -630,7 +675,7 @@ class TemplateEditorView(QWidget):
         self.in_group.textEdited.connect(lambda v: self._set_field("group", v.strip()))
         self.in_points.valueChanged.connect(lambda v: self._set_field("points", float(v)))
         self.in_question.textChanged.connect(lambda: self._set_field("question_text", self.in_question.toPlainText()))
-        self.in_rubric.textChanged.connect(lambda: self._set_field("rubric", self.in_rubric.toPlainText()))
+        self.rubric_editor.changed.connect(self._rubric_edited)
         self.in_notes.textChanged.connect(lambda: self._set_field("grading_notes", self.in_notes.toPlainText()))
         self.in_instructions.textChanged.connect(self._instructions_edited)
         self.cb_strictness.currentIndexChanged.connect(lambda _: self._strictness_changed())
@@ -653,6 +698,30 @@ class TemplateEditorView(QWidget):
         self.cb_columns.currentIndexChanged.connect(lambda _: self.set_columns(self.cb_columns.currentData()))
 
         self.refresh_list()
+        self.apply_llm_mode()
+
+    def apply_llm_mode(self):
+        """Settings → "Use an LLM" off: the LLM actions and the AI-only settings (grading
+        instructions, strictness, columns, notes) are hidden; boxes, questions and rubrics are
+        drawn, typed or imported."""
+        on = llm_enabled()
+        # question areas only tell the LLM where to read the question: hand grading needs the answer box
+        q_mode = self.mode_group.button(MODE_QUESTION)
+        for w in (self.btn_autosetup, self.btn_detect, self.btn_extract, self.btn_rubric, self.btn_extract_all,
+                  self.btn_rubric_all, self.btn_rubric_redo, self.ai_box, self.columns_box, self.notes_box, q_mode):
+            w.setVisible(on)
+        if not on:
+            self.confirm_banner.setVisible(False)
+            if q_mode.isChecked():
+                self.mode_group.button(MODE_ANSWER).setChecked(True)
+                self.on_mode_changed(MODE_ANSWER)
+        self._refresh_overlays()
+        sub = self.findChild(QLabel, "pageSubtitle")
+        if sub is not None:
+            sub.setText(SUBTITLE if on else SUBTITLE_NO_LLM)
+        self.in_question.setPlaceholderText(
+            "Draw a question area (or the answer box is used), then Extract — or type the question." if on else
+            "Optional: type the question (LaTeX), or import it with Import .tex… / Import answer key….")
         self._update_enabled()
 
     # ---------- exam / version list ----------
@@ -677,6 +746,34 @@ class TemplateEditorView(QWidget):
             if t.id == select_id:
                 self.tree.setCurrentItem(child)
         self.tree.expandAll()
+
+    # ---------- exam/version shared with the other tabs (main window) ----------
+    def context(self):
+        return (self.t.exam_name, self.t.id) if self.t is not None else (None, None)
+
+    def set_context(self, exam, tid=None):
+        """Open the version another tab was on (that exam's first version if it gave none).
+        Nothing changes while the LLM works on the open version."""
+        if not exam or self.worker is not None:
+            return
+        if self.t is not None and self.t.exam_name == exam and tid in (None, self.t.id):
+            return
+        versions = list_versions(exam)
+        t = next((v for v in versions if v.id == tid), None) or (versions[0] if versions else None)
+        if t is None or (self.t is not None and self.t.id == t.id):
+            return
+        self._confirm_discard()
+        self.load(t.id)
+        self._select_in_tree(t.id)
+
+    def _select_in_tree(self, tid):
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                kind, val = top.child(j).data(0, Qt.ItemDataRole.UserRole)
+                if kind == "version" and val == tid:
+                    self.tree.setCurrentItem(top.child(j))
+                    return
 
     def _selected_exam(self) -> Optional[str]:
         it = self.tree.currentItem()
@@ -727,7 +824,7 @@ class TemplateEditorView(QWidget):
         self._instr_dirty = True
         self.lbl_saved.setText("Saving…")
         self._instr_timer.start()
-        if self.t and any(r.rubric.strip() for r in self.t.regions):
+        if self.t and any(r.rubric for r in self.t.regions):
             self.lbl_instr_hint.setText("Instructions changed — regenerate rubrics to include them "
                                         "(grading already uses them).")
             self.lbl_instr_hint.setVisible(True)
@@ -840,23 +937,116 @@ class TemplateEditorView(QWidget):
         return t
 
     def delete_version(self):
+        """Delete the open version. The exam's last version takes the exam's scanned tests and
+        grades with it (after a warning; refused while a background job runs)."""
         if not self.t:
             return
-        if QMessageBox.question(self, "Delete version",
-                                f"Delete {self.t.display_name}? Graded submissions are kept but lose their template."
-                                ) != QMessageBox.StandardButton.Yes:
+        exam = self.t.exam_name
+        last = not any(v.id != self.t.id for v in list_versions(exam, self.t.course_id))
+        n = exam_test_count(exam, self.t.course_id) if last else 0
+        Yes, Cancel = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Cancel
+        if n:
+            job = getattr(self.window(), "busy_job", lambda: None)()
+            if job:
+                QMessageBox.information(self, "Delete version", f"{job}. Stop it (or let it finish) before "
+                                                                f"deleting “{exam}”.")
+                return
+            if QMessageBox.warning(self, "Delete version",
+                                   f"{self.t.display_name} is the last version of “{exam}”: deleting it deletes "
+                                   f"the exam, and its {n} scanned test{'s' if n != 1 else ''} and their grades "
+                                   f"are deleted with it. This can't be undone.\n\nDelete it?",
+                                   Yes | Cancel, Cancel) != Yes:
+                return
+        elif QMessageBox.question(self, "Delete version",
+                                  f"Delete {self.t.display_name}? Graded submissions are kept but lose their template."
+                                  ) != Yes:
             return
         self._autosave.stop()
         delete_template(self.t.id)
+        self._close_open()
+        self.refresh_list()
+
+    def _close_open(self):
+        """Nothing open (the version was deleted, moved, or belongs to another course)."""
+        self._autosave.stop()
         self.t, self.t_img, self.sel, self.dirty = None, None, None, False
         self.viewer.set_image(None)
         self.viewer.canvas.set_overlays([])
         self.region_list.clear()
         self._rebuild_page_bar()
-        self.refresh_list()
         self._load_instructions(None)
         self._sync_layout_controls()
         self._update_enabled()
+
+    def course_changed(self):
+        """The sidebar switched course (the main window saved pending edits first): show its
+        exams and open the first one."""
+        self._close_open()
+        self.refresh_list()
+        first = list_templates()
+        if first:
+            self.load(first[0].id)
+            self._select_in_tree(first[0].id)
+
+    def exam_to_course(self):
+        """Copy the selected exam (versions, boxes, questions, rubrics; no scans) to another
+        course, or move it there with its scanned tests and grades."""
+        exam = self._selected_exam()
+        here = current_course()
+        others = [c for c in list_courses() if c["id"] != here]
+        if not exam:
+            return
+        if not others:
+            QMessageBox.information(self, "Copy / move exam", "There is no other course yet: add one with "
+                                                              "“Manage courses…” in the sidebar.")
+            return
+        self.flush()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Copy or move “{exam}”")
+        form = QFormLayout(dlg)
+        cb_course = QComboBox()
+        for c in others:
+            cb_course.addItem(c["name"], c["id"])
+        cb_mode = QComboBox()
+        cb_mode.addItem("Copy (versions, boxes, questions, rubrics; no scans)", "copy")
+        cb_mode.addItem("Move (with its scanned tests and grades)", "move")
+        in_name = QLineEdit(exam)
+        form.addRow("To course", cb_course)
+        form.addRow("Action", cb_mode)
+        form.addRow("Name there", in_name)
+        cb_mode.currentIndexChanged.connect(lambda _: in_name.setEnabled(cb_mode.currentData() == "copy"))
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.copy_or_move_exam(exam, cb_course.currentData(), cb_mode.currentData(), in_name.text())
+
+    def copy_or_move_exam(self, exam: str, to_course: int, mode: str, new_name: str = "") -> bool:
+        here = current_course()
+        try:
+            if mode == "move":
+                move_exam(exam, here, to_course)
+            else:
+                copy_exam(exam, here, to_course, new_name or exam)
+        except ValueError as e:
+            QMessageBox.warning(self, "Copy / move exam", str(e))
+            return False
+        where = course_name(to_course)
+        if mode == "move":
+            if self.t is not None and self.t.exam_name == exam:
+                self._close_open()
+            self.refresh_list()
+            self._status(f"Moved “{exam}” to {where}.")
+        else:
+            self._status(f"Copied “{exam}” to {where} as “{(new_name or exam).strip()}”. Pick that course in the "
+                         "sidebar to see it.")
+        return True
+
+    def _status(self, msg: str):
+        win = self.window()
+        if hasattr(win, "statusBar"):
+            win.statusBar().showMessage(msg, 8000)
 
     def _page_image(self, i: int):
         path = self.t.pages[i]
@@ -877,6 +1067,7 @@ class TemplateEditorView(QWidget):
             return
         self.dirty = False
         self.sel = None
+        self._redraw_uid = None
         self._copy_src_available = bool(self._copy_sources())
         self.viewer.canvas.active_key = None
         self._show_stem()
@@ -920,7 +1111,7 @@ class TemplateEditorView(QWidget):
             self.lbl_layout.setText(text)
             self.cb_columns.setCurrentIndex(max(0, self.cb_columns.findData(int(t.columns or 0))))
         self._loading = False
-        self.confirm_banner.setVisible(t is not None and self._latex_pending_tid == t.id)
+        self.confirm_banner.setVisible(t is not None and self._latex_pending_tid == t.id and llm_enabled())
 
     def _layout_changed(self):
         self._sync_layout_controls()
@@ -1011,18 +1202,95 @@ class TemplateEditorView(QWidget):
 
     # ---------- regions ----------
     def _region_text(self, r):
+        n = len(r.rubric.items)
         marks = ("LaTeX ✓" if r.question_text.strip() else "LaTeX –") + "   " + \
-                ("Rubric ✓" if r.rubric.strip() else "Rubric –") + \
+                (f"Rubric ✓ {n} item{'s' if n != 1 else ''}" if n else "Rubric –") + \
                 ("   Notes ✓" if r.grading_notes.strip() else "")
         page = f"p{r.page + 1}  ·  " if (self.t and self.t.page_count > 1) else ""
-        return f"{page}{r.problem}  ·  {r.group}  ·  {r.points:g} pts\n{marks}"
+        return f"⠿  {page}{r.problem}  ·  {r.group}  ·  {r.points:g} pts\n     {marks}"
+
+    def _region_item(self, r) -> QListWidgetItem:
+        it = QListWidgetItem(self._region_text(r))
+        it.setData(Qt.ItemDataRole.UserRole, r.uid)
+        return it
 
     def _rebuild_region_list(self):
         self._loading = True
         self.region_list.clear()
         for r in (self.t.regions if self.t else []):
-            self.region_list.addItem(QListWidgetItem(self._region_text(r)))
+            self.region_list.addItem(self._region_item(r))
         self._loading = False
+
+    # ---------- question order ----------
+    def _grading_running(self) -> bool:
+        """An LLM run is grading tests of this version (it saves grades by question position)."""
+        return self.t is not None and self.t.id is not None and any(
+            s.status == SUB_GRADING for s in list_submissions(template_id=self.t.id))
+
+    def reorder_regions(self, uids: List[str]) -> bool:
+        """Put the regions in the order of `uids`. Saved grades follow their question (saved with
+        the template). Refused while the AI is grading this version."""
+        if self.t is None or self.worker is not None:
+            return False
+        by_uid = {r.uid: r for r in self.t.regions}
+        if sorted(uids) != sorted(by_uid) or uids == [r.uid for r in self.t.regions]:
+            self._rebuild_region_list()
+            return False
+        if self._grading_running():
+            QMessageBox.information(self, "Question order", "The AI is grading tests of this version. Stop it "
+                                                            "in LLM Grade before reordering the questions.")
+            self._rebuild_region_list()
+            if self.sel is not None:
+                self.region_list.setCurrentRow(self.sel)
+            return False
+        sel_uid = self.t.regions[self.sel].uid if self.sel is not None else None
+        self.t.regions = [by_uid[u] for u in uids]
+        self._rebuild_region_list()
+        self.sel = None
+        if sel_uid is not None:
+            self.region_list.setCurrentRow(uids.index(sel_uid))
+        self._mark_dirty()
+        self._refresh_overlays()
+        return True
+
+    def _grades_lost_note(self, action: str = "") -> str:
+        """Warning for actions that replace every question: grades of removed questions are deleted."""
+        n = count_template_grades(self.t.id) if (self.t is not None and self.t.id) else 0
+        if not n:
+            return ""
+        who = f"“{action}” replaces" if action else "This replaces"
+        return (f"\n\n{who} the questions, so the {n} grade{'s' if n != 1 else ''} already given on tests of "
+                "this version are deleted when the change is saved.")
+
+    def _regions_dragged(self):
+        if self._loading:
+            return
+        uids = [self.region_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.region_list.count())]
+        # the list already shows the new order; apply it (or put the list back)
+        QTimer.singleShot(0, lambda: self.reorder_regions(uids))
+
+    def move_region(self, step: int):
+        if self.t is None or self.sel is None:
+            return
+        j = self.sel + step
+        if not 0 <= j < len(self.t.regions):
+            return
+        uids = [r.uid for r in self.t.regions]
+        uids.insert(j, uids.pop(self.sel))
+        self.reorder_regions(uids)
+
+    def sort_regions(self):
+        """Order by question number and part (1, 2a, 2b, 10); unnumbered ones keep their order last."""
+        if self.t is None:
+            return
+        def key(ir):
+            i, r = ir
+            p = parse_label(r.problem)
+            return (0, p[0], _part_key(p[1] or ""), i) if p else (1, 0, (), i)
+        uids = [r.uid for _, r in sorted(enumerate(self.t.regions), key=key)]
+        if not self.reorder_regions(uids):
+            self.window().statusBar().showMessage("The questions are already in number order.", 3000) \
+                if hasattr(self.window(), "statusBar") else None
 
     def _refresh_overlays(self):
         if not self.t:
@@ -1030,13 +1298,15 @@ class TemplateEditorView(QWidget):
             self.lbl_name_status.setText("")
             return
         ovs = []
+        show_questions = llm_enabled()     # question areas are only for the LLM
         for i, r in enumerate(self.t.regions):
             if r.page != self.page:
                 continue
             sel = i == self.sel
-            ovs.append(Overlay(r.rect, theme.COLOR_SELECTED if sel else theme.COLOR_ANSWER,
-                               f"{r.problem} · {r.points:g}", sel, key=("a", i), editable=True))
-            if r.question_rect:
+            if r.uid != self._redraw_uid:  # the box being redrawn is gone: drag the new one anywhere
+                ovs.append(Overlay(r.rect, theme.COLOR_SELECTED if sel else theme.COLOR_ANSWER,
+                                   f"{r.problem} · {r.points:g}", sel, key=("a", i), editable=True))
+            if r.question_rect and show_questions:
                 ovs.append(Overlay(r.question_rect, theme.COLOR_QUESTION, f"{r.problem} question" if sel else "",
                                    sel, dashed=True, key=("q", i), editable=True))
         active = self.viewer.canvas.active_key
@@ -1066,11 +1336,12 @@ class TemplateEditorView(QWidget):
     def current_step(self) -> int:
         """0-based index into STEPS of what the user should do next."""
         regs = self.t.regions if self.t else []
-        if not regs or not all(r.question_text.strip() for r in regs):
+        # without an LLM the question text is optional (hand grading shows the answer itself)
+        if not regs or (llm_enabled() and not all(r.question_text.strip() for r in regs)):
             return 0
-        if not any(r.rubric.strip() for r in regs):
+        if not any(r.rubric for r in regs):
             return 1
-        if not all(r.rubric.strip() for r in regs):
+        if not all(r.rubric for r in regs):
             return 2
         return 3
 
@@ -1080,7 +1351,7 @@ class TemplateEditorView(QWidget):
             return
         cur = self.current_step()
         parts = []
-        for i, s in enumerate(STEPS):
+        for i, s in enumerate(STEPS if llm_enabled() else STEPS_NO_LLM):
             if i < cur:
                 parts.append(f"<span style='color:{theme.OK}'>✓ {s}</span>")
             elif i == cur:
@@ -1094,28 +1365,41 @@ class TemplateEditorView(QWidget):
         has_sel = has_t and self.sel is not None
         busy = self.worker is not None
         # region indices/contents must stay stable while a job runs (results are applied by index)
-        for w in (self.in_problem, self.in_group, self.in_points, self.in_question, self.in_rubric, self.in_notes):
+        for w in (self.in_problem, self.in_group, self.in_points, self.in_question, self.rubric_editor, self.in_notes):
             w.setEnabled(has_sel and not busy)
         self.in_instructions.setEnabled(has_t)
         self.cb_strictness.setEnabled(has_t)
         self.btn_del_region.setEnabled(has_sel and not busy)
+        # redrawing lasts while its question stays selected in Answer mode (else it is cancelled)
+        if self._redraw_uid is not None and (busy or not has_sel or self.mode_group.checkedId() != MODE_ANSWER
+                                             or self.t.regions[self.sel].uid != self._redraw_uid):
+            self._redraw_uid = None
+            self._refresh_overlays()
+        self.btn_redraw_box.setEnabled(has_sel and not busy)
+        self.btn_redraw_box.setChecked(self._redraw_uid is not None)
+        n_regions = len(self.t.regions) if has_t else 0
+        self.btn_region_up.setEnabled(has_sel and not busy and self.sel > 0)
+        self.btn_region_down.setEnabled(has_sel and not busy and self.sel < n_regions - 1)
+        self.btn_sort_regions.setEnabled(has_t and not busy and n_regions > 1)
+        self.region_list.setDragEnabled(has_t and not busy)
         self.viewer.canvas.draw_enabled = has_t and not busy
         self.btn_extract.setEnabled(has_sel and not busy)
         self.btn_rubric.setEnabled(has_sel and not busy and self.t.regions[self.sel].points > 0)
         self.btn_extract_all.setEnabled(has_t and not busy and bool(self.t.regions))
         self.btn_rubric_all.setEnabled(has_t and not busy and any(r.points > 0 for r in self.t.regions))
-        self.btn_rubric_redo.setEnabled(has_t and not busy and any(r.rubric.strip() for r in self.t.regions))
+        self.btn_rubric_redo.setEnabled(has_t and not busy and any(r.rubric for r in self.t.regions))
         self.btn_copy_boxes.setVisible(has_t and self._copy_src_available)
         self.btn_copy_boxes.setEnabled(not busy)
         self.btn_import_key.setEnabled(has_t and not busy)
         self.btn_import_tex.setEnabled(has_t and not busy)
-        has_rubric = has_sel and bool(self.t.regions[self.sel].rubric.strip())
+        has_rubric = has_sel and bool(self.t.regions[self.sel].rubric)
         self.btn_rubric.setText("Redo from scratch" if has_rubric else "Generate with LLM")
         self.btn_detect.setEnabled(has_t and not busy)
         self.btn_autosetup.setEnabled(has_t and not busy)
         self.btn_del_version.setEnabled(has_t)
         self.btn_new_exam.setEnabled(not busy)
         self.btn_add_version.setEnabled(not busy)
+        self.btn_exam_course.setEnabled(not busy and bool(self._selected_exam()))
         self.tree.setEnabled(not busy)
         self.btn_stop.setVisible(busy)
         for w in (self.chk_double, self.btn_layout, self.cb_columns):
@@ -1127,6 +1411,9 @@ class TemplateEditorView(QWidget):
             hint = "Create or select an exam version to start."
         elif busy:
             hint = "The LLM is working — you can look around, editing boxes is paused."
+        elif self._redraw_uid is not None:
+            hint = (f"Drag the new answer box of {self.t.regions[self.sel].problem} (on any page). "
+                    "Its points, question and rubric stay. Esc or Redraw box again keeps the old box.")
         elif mode == MODE_ANSWER:
             hint = ("Drag on the page to add an answer box. Click a box to select it, then drag it or its "
                     "handles to move/resize (arrow keys nudge; Shift+drag draws over boxes). Ctrl+wheel zooms.")
@@ -1179,15 +1466,50 @@ class TemplateEditorView(QWidget):
                     self, "Question area", "Clear the existing LaTeX so it can be re-extracted?"
             ) == QMessageBox.StandardButton.Yes:
                 self.in_question.setPlainText("")
+        elif self._redraw_uid is not None and self.sel is not None:
+            # "Redraw box": only the answer box changes; points, LaTeX, rubric and grades stay
+            r = self.t.regions[self.sel]
+            if r.page != self.page:
+                r.page, r.question_rect = self.page, None   # its question area was on the old page
+            r.rect = rect
+            self._redraw_uid = None
+            self.viewer.canvas.active_key = ("a", self.sel)
+            item = self.region_list.item(self.sel)
+            if item:
+                item.setText(self._region_text(r))
+            self._update_enabled()
         else:
             prev = self.t.regions[-1] if self.t.regions else None
             n = len(self.t.regions) + 1
             r = add_region(self.t, f"Q{n}", prev.group if prev else "default", rect, DEFAULT_POINTS)
             r.page = self.page
-            self.region_list.addItem(QListWidgetItem(self._region_text(r)))
+            self.region_list.addItem(self._region_item(r))
             self.region_list.setCurrentRow(len(self.t.regions) - 1)
         self._mark_dirty()
         self._refresh_overlays()
+
+    def redraw_box(self):
+        """Remove the selected question's answer box; the next drag (any page) is its new box."""
+        if self.t is None or self.sel is None or self.worker is not None:
+            self._update_enabled()
+            return
+        if self.mode_group.checkedId() != MODE_ANSWER:
+            self.mode_group.button(MODE_ANSWER).setChecked(True)
+            self.on_mode_changed(MODE_ANSWER)
+        self._redraw_uid = self.t.regions[self.sel].uid
+        self.viewer.canvas.active_key = None      # a drag over the old place draws, it doesn't move
+        self._refresh_overlays()
+        self._update_enabled()
+
+    def cancel_redraw(self):
+        """Keep the old answer box (Esc, or Redraw box clicked again)."""
+        if self._redraw_uid is None:
+            return
+        self._redraw_uid = None
+        if self.sel is not None:
+            self.viewer.canvas.active_key = ("a", self.sel)
+        self._refresh_overlays()
+        self._update_enabled()
 
     def on_overlay_clicked(self, key):
         """Select the clicked box; it becomes the active box (handles to move/resize it)."""
@@ -1264,7 +1586,7 @@ class TemplateEditorView(QWidget):
         self.in_group.setText(r.group if r else "")
         self.in_points.setValue(r.points if r else 0)
         self.in_question.setPlainText(r.question_text if r else "")
-        self.in_rubric.setPlainText(r.rubric if r else "")
+        self.rubric_editor.set_rubric(r.rubric if r else None, r.points if r else 0)
         self.in_notes.setPlainText(r.grading_notes if r else "")
         self._loading = False
         key = r.answer_key.strip() if r else ""
@@ -1291,6 +1613,9 @@ class TemplateEditorView(QWidget):
         if getattr(r, field) == value:
             return
         setattr(r, field, value)
+        if field == "points":
+            r.rubric.max_points = value
+            self.rubric_editor.set_max_points(value)
         item = self.region_list.item(self.sel)
         if item:
             item.setText(self._region_text(r))
@@ -1302,10 +1627,36 @@ class TemplateEditorView(QWidget):
             self._update_enabled()
         self._mark_dirty()
 
+    def _rubric_edited(self):
+        """The rubric editor changed (items, points, order, scoring or expected answer)."""
+        if self._loading or self.t is None or self.sel is None:
+            return
+        r = self.t.regions[self.sel]
+        r.rubric = self.rubric_editor.rubric()
+        r.rubric.max_points = r.points
+        item = self.region_list.item(self.sel)
+        if item:
+            item.setText(self._region_text(r))
+        self._update_enabled()
+        self._mark_dirty()
+
     def delete_region(self):
         if self.t is None or self.sel is None or self.worker is not None:
             return
         row = self.sel
+        r = self.t.regions[row]
+        if self.t.id is not None:
+            n = count_region_grades(self.t.id, row)
+            if n and self._grading_running():
+                QMessageBox.information(self, "Delete question", "The AI is grading tests of this version. "
+                                                                 "Stop it in LLM Grade first.")
+                return
+            if n and QMessageBox.question(
+                    self, "Delete question",
+                    f"{n} test{'s have' if n != 1 else ' has'} a grade for {r.problem}. Deleting the question "
+                    "deletes those grades too (when the change is saved). Continue?"
+            ) != QMessageBox.StandardButton.Yes:
+                return
         del self.t.regions[row]
         self._rebuild_region_list()
         self.sel = None
@@ -1325,7 +1676,7 @@ class TemplateEditorView(QWidget):
             todo = [(i, r) for i, r in enumerate(self.t.regions) if r.points > 0]
             if not todo:
                 QMessageBox.information(self, "Rubrics", "Set the max points first."); return
-            n_old = sum(1 for _, r in todo if r.rubric.strip())
+            n_old = sum(1 for _, r in todo if r.rubric)
             if n_old and QMessageBox.question(
                     self, "Redo all rubrics",
                     f"Replace {n_old} existing rubric(s) with new ones written from scratch?\n\n"
@@ -1340,15 +1691,15 @@ class TemplateEditorView(QWidget):
             if kind == "extract" and r.question_text.strip() and QMessageBox.question(
                     self, "Re-extract", "Replace the current question text?") != QMessageBox.StandardButton.Yes:
                 return
-            if kind == "rubric" and r.rubric.strip() and QMessageBox.question(
+            if kind == "rubric" and r.rubric and QMessageBox.question(
                     self, "Regenerate", "Replace the current rubric?") != QMessageBox.StandardButton.Yes:
                 return
             if kind == "rubric" and r.points <= 0:
                 QMessageBox.information(self, "Rubric", "Set the max points first."); return
             todo = [(self.sel, r)]
         else:
-            attr = "question_text" if kind == "extract" else "rubric"
-            todo = [(i, r) for i, r in enumerate(self.t.regions) if not getattr(r, attr).strip()]
+            has = (lambda r: r.question_text.strip()) if kind == "extract" else (lambda r: bool(r.rubric))
+            todo = [(i, r) for i, r in enumerate(self.t.regions) if not has(r)]
             if kind == "rubric":
                 skipped = [r.problem for _, r in todo if r.points <= 0]
                 todo = [(i, r) for i, r in todo if r.points > 0]
@@ -1376,7 +1727,7 @@ class TemplateEditorView(QWidget):
         """Other versions of this exam that have boxes."""
         if self.t is None:
             return []
-        return [v for v in list_versions(self.t.exam_name) if v.id != self.t.id and v.regions]
+        return [v for v in list_versions(self.t.exam_name, self.t.course_id) if v.id != self.t.id and v.regions]
 
     def copy_boxes_from_version(self):
         """Fill an empty version with the outline of another version (boxes, points, fields)."""
@@ -1394,7 +1745,8 @@ class TemplateEditorView(QWidget):
             src = srcs[labels.index(choice)]
         if self.t.regions and QMessageBox.question(
                 self, "Copy boxes", f"Replace the {len(self.t.regions)} region(s) of this version with the "
-                                    f"boxes of version {src.version_label}?") != QMessageBox.StandardButton.Yes:
+                                    f"boxes of version {src.version_label}?" + self._grades_lost_note()
+        ) != QMessageBox.StandardButton.Yes:
             return
         dup = duplicate_as_version(src, list(self.t.pages), self.t.version_label, keep_text=False)
         self.t.regions = dup.regions
@@ -1480,13 +1832,13 @@ class TemplateEditorView(QWidget):
         self._mark_dirty()
         self._refresh_overlays()
         self._update_enabled()
-        todo = [r.problem for r in self.t.regions if r.answer_key and not r.rubric.strip()]
+        todo = [r.problem for r in self.t.regions if r.answer_key and not r.rubric]
         graded = sum(1 for s in list_submissions(template_id=self.t.id) if s.status == SUB_GRADED)
         self.window().statusBar().showMessage(
             f"Imported {len(rep.matched)} question(s)." +
             (" Cleared notes/answers not in the key." if replace else "") +
             (f" Rubrics still to write ({', '.join(todo)}): Generate rubrics uses the key's answers." if todo else "") +
-            (f" {graded} test(s) of this version were graded before: Regrade them in Scan & Grade."
+            (f" {graded} test(s) of this version were graded before: Regrade them in LLM Grade."
              if graded else ""),
             15000)
 
@@ -1607,7 +1959,7 @@ class TemplateEditorView(QWidget):
         if kind == "question":
             r.question_text = text
         else:
-            r.rubric = text
+            r.set_rubric(text)       # a Rubric from the LLM (or text from a custom client)
         self.region_list.item(i).setText(self._region_text(r))
         if i == self.sel:
             self.select_region(i)
@@ -1642,7 +1994,7 @@ class TemplateEditorView(QWidget):
         if self.t.regions:
             box = QMessageBox(QMessageBox.Icon.Question, "Auto-detect regions",
                               f"This version already has {len(self.t.regions)} region(s). "
-                              "What should happen to them?", parent=self)
+                              "What should happen to them?" + self._grades_lost_note("Replace all"), parent=self)
             b_replace = box.addButton("Replace all", QMessageBox.ButtonRole.DestructiveRole)
             b_add = box.addButton("Add missing only", QMessageBox.ButtonRole.AcceptRole)
             box.addButton(QMessageBox.StandardButton.Cancel)

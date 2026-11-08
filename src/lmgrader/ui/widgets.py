@@ -3,9 +3,71 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import cv2
 import numpy as np
-from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel, QSizePolicy
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QThread
+from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel, QSizePolicy, QLayout
+from PyQt6.QtCore import Qt, QRectF, QPointF, QRect, QSize, QPoint, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont
+
+class FlowLayout(QLayout):
+    """Widgets left to right at their natural size, wrapping to a new line when the row is full
+    (e.g. one chip per question: an exam may have 20)."""
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, move=True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            if not it.isEmpty():
+                size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _arrange(self, rect, move: bool) -> int:
+        """Place the items in `rect` (only measure unless `move`); returns the height used."""
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = r.x(), r.y(), 0
+        for it in self._items:
+            if it.isEmpty():                     # hidden widgets take no room
+                continue
+            hint = it.sizeHint()
+            if x + hint.width() > r.right() + 1 and line_h > 0:
+                x, y, line_h = r.x(), y + line_h + self._spacing, 0
+            if move:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._spacing
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
 
 def np_to_pixmap(img: np.ndarray) -> QPixmap:
     if img.ndim == 2:

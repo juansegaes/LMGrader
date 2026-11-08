@@ -123,8 +123,8 @@ def test_ui_smoke(world, qapp):
     n_regions = tv.region_list.count()
     assert n_regions >= 1
     tv.region_list.setCurrentRow(0)
-    tv.in_rubric.setPlainText("new rubric")
-    assert tv.dirty and tv.t.regions[0].rubric == "new rubric"
+    tv.rubric_editor.add_item(1, "new rubric")
+    assert tv.dirty and tv.t.regions[0].rubric.items[-1].description == "new rubric"
     tv.mode_group.button(te.MODE_ANSWER).setChecked(True)
     tv.on_rect_drawn((100, 600, 200, 100))
     assert len(tv.t.regions) == n_regions + 1 and tv.sel == n_regions
@@ -132,12 +132,13 @@ def test_ui_smoke(world, qapp):
     assert not tv.dirty
 
     sv = mw.scan_view
-    mw.nav.setCurrentRow(2)
+    mw.nav.setCurrentRow(mw.stack.indexOf(sv))
     qapp.processEvents()
     sv.cb_exam.setCurrentIndex(sv.cb_exam.findText("Midterm"))
     qapp.processEvents()
     sv.chk_names.setChecked(False)  # no LLM in this test
     new_ids = sv.add_pages([world["scan"], world["pa"]])   # 1-page exam -> two tests
+    sv.read_names()
     t0 = time.time()
     while sv.worker is not None and time.time() - t0 < 30:
         qapp.processEvents()
@@ -152,7 +153,7 @@ def test_ui_smoke(world, qapp):
     sv.reload()
 
     rv = mw.review_view
-    mw.nav.setCurrentRow(3)
+    mw.nav.setCurrentRow(mw.stack.indexOf(rv))
     qapp.processEvents()
     rv.cb_exam.setCurrentIndex(rv.cb_exam.findData("Midterm"))
     qapp.processEvents()
@@ -162,8 +163,10 @@ def test_ui_smoke(world, qapp):
     assert rv.detail_layout.count() >= 2
 
     SCREENSHOT_DIR.mkdir(exist_ok=True)
-    for i, name in enumerate(["templates", "students", "scan", "review", "settings"]):
-        mw.nav.setCurrentRow(i)
+    # by view, not row: rows shift when a tab is added (Hand Grade, LLM Grade)
+    for name, view in [("templates", mw.template_view), ("students", mw.students_view),
+                       ("scan", mw.scan_view), ("review", mw.review_view), ("settings", mw.settings_view)]:
+        mw.nav.setCurrentRow(mw.stack.indexOf(view))
         qapp.processEvents()
         assert mw.grab().save(str(SCREENSHOT_DIR / f"shot_{name}.png"))
     mw.template_view.dirty = False

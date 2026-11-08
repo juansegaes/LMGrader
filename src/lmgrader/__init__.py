@@ -1,2 +1,2 @@
-"""LMGrader: FOSS local alternative to Gradescope."""
-__version__ = "0.1.0"
+"""LMGrader: FOSS local app for grading physical tests."""
+__version__ = "0.3.141592"

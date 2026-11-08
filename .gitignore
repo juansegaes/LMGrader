@@ -24,3 +24,10 @@ venv/
 
 # logs
 *.log
+
+# secrets and dev artifacts
+.env
+Blank_cnn/
+dummy_test.md
+src/lmgrader/tests/
+tabertcaelan.pdf

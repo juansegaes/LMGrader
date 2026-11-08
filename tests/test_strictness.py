@@ -73,7 +73,7 @@ def test_editor_setting_reaches_the_grader(editor, page, tmp_path):
     tv.cb_strictness.setCurrentIndex(tv.cb_strictness.findData(6))
     assert db.get_exam_strictness("Strictness exam") == 6
     _setup_region(tv)
-    tv.in_rubric.setPlainText("- [4 pt] both roots")
+    tv.rubric_editor.add_item(4, "both roots")
     tv.flush()
     scan = str(tmp_path / "scan.png"); save_image(scan, make_page(300, "INSTRUCTIONS"))
     sub = session.create_submissions("Strictness exam", [scan], 1)[0][0]

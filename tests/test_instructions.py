@@ -96,7 +96,7 @@ def test_rubric_generation_receives_instructions_and_notes(editor, page):
     tv.in_instructions.setPlainText(INSTR)
     _setup_region(tv)
     tv.run_ai("rubric")       # bulk: regions without a rubric
-    wait_for(qapp, lambda: tv.worker is None and tv.t.regions[0].rubric.strip())
+    wait_for(qapp, lambda: tv.worker is None and bool(tv.t.regions[0].rubric))
     assert llm.rubric_calls == [{"problem": "Q1", "instructions": INSTR, "notes": "Accept degrees or radians."}]
 
     # changing instructions after rubrics exist shows the regenerate hint
@@ -112,7 +112,7 @@ def test_grader_passes_instructions_and_notes(editor, page, tmp_path):
     t = tv.create_exam("Grade instr", [page])
     tv.in_instructions.setPlainText(INSTR)
     _setup_region(tv, notes="Final answer must be boxed.")
-    tv.in_rubric.setPlainText("- [4 pt] both roots")
+    tv.rubric_editor.add_item(4, "both roots")
     tv.flush()
 
     scan = str(tmp_path / "scan.png"); save_image(scan, make_page(300, "INSTRUCTIONS"))

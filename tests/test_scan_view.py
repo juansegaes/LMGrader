@@ -88,6 +88,9 @@ def test_upload_split_names_grade_resume(qapp, view, exam2p, monkeypatch):
     entries = [{"path": p, "file": "batch.pdf", "page": i + 1} for i, p in enumerate(exam2p["scans"])]
     ids = view.add_pages(entries)
     assert len(ids) == 2
+    assert view.worker is None and view.names_banner.isVisible()   # names wait for the button
+    assert "2 to read" in view.step_btns[1].text()
+    view.read_names()
     wait_idle(qapp, view)
     subs = {s.id: s for s in db.list_submissions_by_status(EXAM)}
     assert [len(subs[i].pages) for i in ids] == [2, 2]
@@ -136,6 +139,28 @@ def test_upload_split_names_grade_resume(qapp, view, exam2p, monkeypatch):
     v2.close()
 
 
+def test_names_red_when_nobody_matched_yellow_when_unsure(qapp, view, exam2p):
+    from lmgrader.models import Student
+    from lmgrader.ui import theme
+    from lmgrader.ui.scan_view import COL_N_STUDENT, COL_N_STATUS
+    entries = [{"path": p, "file": "colors.pdf", "page": i + 1} for i, p in enumerate(exam2p["scans"])]
+    none, unsure = view.add_pages(entries)
+    guess = db.add_student(Student(name="Unsure Guess"))
+    for sid, student in ((none, None), (unsure, guess)):      # the reader found nobody / is not sure
+        s = db.get_submission(sid)
+        s.status, s.template_id, s.student_id, s.name_confirmed = SUB_IDENTIFIED, exam2p["template_id"], student, False
+        db.update_submission(s)
+    view.reload(); qapp.processEvents()
+    t = view.table_names
+    row = {t.item(r, 0).data(0x0100): r for r in range(t.rowCount())}
+    style = lambda sid: t.cellWidget(row[sid], COL_N_STUDENT).styleSheet()
+    assert theme.DANGER in style(none) and theme.WARN not in style(none)
+    assert theme.WARN in style(unsure) and theme.DANGER not in style(unsure)
+    assert t.item(row[none], COL_N_STATUS).text() == "No match"
+    assert t.item(row[unsure], COL_N_STATUS).text() == "Confirm"
+    assert "No student on the roster matched" in t.cellWidget(row[none], COL_N_STUDENT).toolTip()
+
+
 def test_leftover_pages_are_kept_for_next_upload(qapp, view, exam2p, monkeypatch):
     _use_llm(monkeypatch, SeqLLM([]))
     view.chk_names.setChecked(False)
@@ -144,11 +169,13 @@ def test_leftover_pages_are_kept_for_next_upload(qapp, view, exam2p, monkeypatch
     ids = view.add_pages([{"path": scans[0], "file": "a.pdf", "page": 1},
                           {"path": scans[1], "file": "a.pdf", "page": 2},
                           {"path": scans[2], "file": "b.pdf", "page": 1}])
+    view.read_names()
     wait_idle(qapp, view)
     assert len(ids) == 1 and view.pending_box.isVisible() and "b.pdf p1" in view.lbl_pending.text()
     view.step_group.button(0).click(); qapp.processEvents()
     view.grab().save(str(SCREENSHOT_DIR / "scan_upload.png"))
     ids2 = view.add_pages([{"path": scans[3], "file": "b.pdf", "page": 2}])
+    view.read_names()
     wait_idle(qapp, view)
     assert len(ids2) == 1 and not view.pending_box.isVisible()
     assert db.get_submission(ids2[0]).source == "b.pdf p1–2"
@@ -166,6 +193,7 @@ def test_regrade_graded_tests(qapp, view, exam2p, monkeypatch):
     view.chk_names.setChecked(False)
     scans = exam2p["scans"]
     ids = view.add_pages([{"path": p, "file": "rg.pdf", "page": i + 1} for i, p in enumerate(scans)])
+    view.read_names()
     wait_idle(qapp, view)
     bob = next(s for s in db.list_students() if s.name == "Bob Smith")
     for i in ids:
@@ -224,6 +252,7 @@ def test_stop_identification_keeps_untouched_tests_waiting(qapp, view, exam2p, m
     view.chk_names.setChecked(True)
     scans = exam2p["scans"]
     ids = view.add_pages([{"path": p, "file": "s.pdf", "page": i + 1} for i, p in enumerate(scans)])
+    view.read_names()
     assert view.worker is not None and view.btn_stop_job.isVisible()
     t0 = time.time()
     while not llm.started.is_set() and time.time() - t0 < 20:
@@ -251,6 +280,7 @@ def test_double_sided_layout_split(qapp, view, exam2p, monkeypatch):
         s = exam2p["scans"]
         pages = [s[0], "back1.png", s[1], "back2.png", s[2], "back3.png", s[3], "back4.png"]
         ids = view.add_pages([{"path": p, "file": "duplex.pdf", "page": i + 1} for i, p in enumerate(pages)])
+        view.read_names()
         wait_idle(qapp, view)
         assert len(ids) == 2
         a, b = db.get_submission(ids[0]), db.get_submission(ids[1])

@@ -80,6 +80,104 @@ def test_click_selects_then_edits_other_boxes(tv, qapp):
     assert len(tv.t.regions) == n + 1 and tv.t.regions[1].rect == (100, 600, 300, 150)
 
 
+def _answer_keys(canvas):
+    return {o.key for o in canvas.overlays if o.key and o.key[0] == "a"}
+
+
+def test_redraw_box_replaces_only_the_answer_box(tv, qapp):
+    from lmgrader.models import Rubric, RubricItem
+    c = tv.viewer.canvas
+    r = tv.t.regions[0]
+    r.points, r.question_text = 4, "x^2 + 1"
+    r.rubric = Rubric(max_points=4, items=[RubricItem(4, "right answer")])
+    uid, item_id = r.uid, r.rubric.items[0].id
+    tv.btn_redraw_box.click()
+    assert tv.btn_redraw_box.isChecked() and ("a", 0) not in _answer_keys(c) and c.active_key is None
+    assert "new answer box of Q1" in tv.lbl_hint.text()
+    # a real drag right over where the old box was draws the new box (it doesn't move the old one)
+    _drag(c, _pt(c, 120, 320), _pt(c, 520, 420))
+    r = tv.t.regions[0]
+    assert len(tv.t.regions) == 2 and r.uid == uid
+    x, y, w, h = r.rect
+    assert abs(x - 120) <= 3 and abs(y - 320) <= 3 and abs(w - 400) <= 3 and abs(h - 100) <= 3
+    assert (r.points, r.question_text, r.rubric.items[0].id) == (4, "x^2 + 1", item_id)
+    assert not tv.btn_redraw_box.isChecked() and ("a", 0) in _answer_keys(c) and c.active_key == ("a", 0)
+    tv.flush()
+    saved = db.load_template(tv.t.id).regions[0]
+    assert saved.rect == r.rect and saved.uid == uid and saved.rubric.items[0].id == item_id
+    # the next drag adds a new question again
+    _drag(c, _pt(c, 600, 700), _pt(c, 800, 800))
+    assert len(tv.t.regions) == 3
+
+
+def test_redraw_box_is_cancelled_by_esc_another_question_or_mode(tv, qapp):
+    from lmgrader.ui import template_editor as te
+    c = tv.viewer.canvas
+    before = tv.t.regions[0].rect
+    tv.btn_redraw_box.click()
+    tv.window().activateWindow()                  # shortcuts only reach the active window
+    QTest.qWaitForWindowActive(tv.window())
+    c.setFocus()
+    QTest.keyClick(c, Qt.Key.Key_Escape)
+    assert not tv.btn_redraw_box.isChecked() and ("a", 0) in _answer_keys(c)
+    tv.btn_redraw_box.click()
+    tv.btn_redraw_box.click()                     # clicking it again keeps the old box too
+    assert tv._redraw_uid is None and ("a", 0) in _answer_keys(c)
+    tv.btn_redraw_box.click()
+    tv.region_list.setCurrentRow(1)
+    assert tv._redraw_uid is None and ("a", 0) in _answer_keys(c)
+    tv.btn_redraw_box.click()                     # Q2 now
+    tv.mode_group.button(te.MODE_NAME).click()
+    assert tv._redraw_uid is None
+    tv.on_rect_drawn((500, 100, 300, 60))         # a name field, not Q2's box
+    assert tv.t.regions[0].rect == before and tv.t.regions[1].rect == (100, 600, 300, 150)
+    assert tv.t.name_rect == (500, 100, 300, 60) and len(tv.t.regions) == 2
+
+
+def test_redraw_box_can_move_a_question_to_another_page(qapp, tmp_path):
+    from lmgrader.ui.main_window import MainWindow
+    pages = []
+    for k in (1, 2):
+        pages.append(str(tmp_path / f"p{k}.png"))
+        save_image(pages[-1], make_page(90 + k, f"PAGE {k}"))
+    mw = MainWindow(); mw.resize(1400, 880); mw.show(); qapp.processEvents()
+    tv = mw.template_view
+    try:
+        tv.create_exam("Two pages", pages)
+        tv.on_rect_drawn((100, 300, 300, 150))
+        tv.t.regions[0].question_rect = (100, 200, 300, 80)
+        tv.region_list.setCurrentRow(0)
+        tv.btn_redraw_box.click()
+        tv.set_page(1)                            # the right place is on page 2
+        assert tv._redraw_uid is not None
+        tv.on_rect_drawn((150, 400, 300, 150))
+        r = tv.t.regions[0]
+        assert (r.page, r.rect, r.question_rect) == (1, (150, 400, 300, 150), None)
+        assert len(tv.t.regions) == 1 and "p2" in tv.region_list.item(0).text()
+    finally:
+        tv.flush(); mw.close()
+
+
+def test_without_llm_there_is_no_question_area(tv, qapp, monkeypatch):
+    from lmgrader.config import LLM_CONFIG
+    from lmgrader.ui import template_editor as te
+    c = tv.viewer.canvas
+    tv.t.regions[0].question_rect = (100, 200, 300, 80)
+    tv.mode_group.button(te.MODE_QUESTION).click()
+    tv._refresh_overlays()
+    assert ("q", 0) in {o.key for o in c.overlays}
+    monkeypatch.setitem(LLM_CONFIG, "enabled", False)
+    tv.apply_llm_mode()
+    assert tv.mode_group.button(te.MODE_QUESTION).isHidden()
+    assert tv.mode_group.checkedId() == te.MODE_ANSWER        # never left in a hidden mode
+    assert ("q", 0) not in {o.key for o in c.overlays} and ("a", 0) in _answer_keys(c)
+    assert tv.t.regions[0].question_rect == (100, 200, 300, 80)   # kept for when the LLM is back
+    monkeypatch.setitem(LLM_CONFIG, "enabled", True)
+    tv.apply_llm_mode()
+    assert not tv.mode_group.button(te.MODE_QUESTION).isHidden()
+    assert ("q", 0) in {o.key for o in c.overlays}
+
+
 def test_no_editing_while_llm_runs(tv, qapp):
     c = tv.viewer.canvas
     before = tv.t.regions[0].rect

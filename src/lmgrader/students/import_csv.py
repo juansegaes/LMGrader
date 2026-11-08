@@ -1,23 +1,29 @@
-"""Student import from CSV."""
-import csv
+"""Student import from CSV: the name, ID and email columns are read from the header."""
 from typing import List
+from ..csvtable import (Table, read_table, row_name, is_points_row, guess_column, guess_name_columns,
+                        ID_WORDS, EMAIL_WORDS)
 from ..models import Student
 from ..db import add_student
 
-def import_csv(path: str) -> List[Student]:
+def students_from_table(table: Table, layout: str, name_col: int, col2: int = -1,
+                        id_col: int = -1, email_col: int = -1) -> List[Student]:
+    """col2: the second name column of a two-column layout (see csvtable.row_name)."""
     students = []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # flexible column names
-            name = row.get("name") or row.get("Name") or row.get("student_name") or ""
-            sid = row.get("student_id") or row.get("id") or row.get("ID") or ""
-            email = row.get("email") or row.get("Email") or ""
-            if not name.strip():
-                continue
-            s = Student(name=name.strip(), student_id=str(sid).strip(), email=email.strip())
-            students.append(s)
+    for row in table.rows:
+        name = row_name(table, row, layout, name_col, col2)
+        if not name or is_points_row(name):
+            continue
+        student_id = table.cell(row, id_col) if id_col >= 0 else ""
+        email = table.cell(row, email_col) if email_col >= 0 else ""
+        students.append(Student(name=name, student_id=student_id, email=email))
     return students
+
+def import_csv(path: str) -> List[Student]:
+    table = read_table(path)
+    layout, col, col2 = guess_name_columns(table)
+    id_col = guess_column(table.headers, ID_WORDS, exclude=[col, col2])
+    email_col = guess_column(table.headers, EMAIL_WORDS, exclude=[col, col2, id_col])
+    return students_from_table(table, layout, col, col2, id_col, email_col)
 
 def import_and_store(path: str) -> int:
     count = 0

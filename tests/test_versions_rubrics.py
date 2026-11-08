@@ -77,8 +77,10 @@ def test_redo_rubrics(tv, qapp, tmp_path):
     assert v.worker is None and llm.n == 0
     v.btn_rubric_redo.click()
     wait_for(qapp, lambda: v.worker is None)
-    assert [r.rubric for r in v.t.regions] == ["- [3 pt] new rubric 1", "- [3 pt] new rubric 2"]
+    assert [[(i.points, i.description) for i in r.rubric.items] for r in v.t.regions] == \
+        [[(3, "new rubric 1")], [(3, "new rubric 2")]]
     v.flush()
-    assert db.load_template(t.id).regions[1].rubric == "- [3 pt] new rubric 2"
-    v.in_rubric.setPlainText("")
+    assert db.load_template(t.id).regions[1].rubric.items[0].description == "new rubric 2"
+    while v.rubric_editor.rubric().items:
+        v.rubric_editor.delete_item(0)
     assert v.btn_rubric.text() == "Generate with LLM"

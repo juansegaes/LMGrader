@@ -6,19 +6,24 @@ rubrics. Boxes still come from the page (auto-detect or drawn); the key is match
 ("1a" <-> region "Q1 (a)"). The format is documented in assets/answer_key_skill/SKILL.md, which is
 also the Claude Code skill that writes these files.
 
-    {"format": "lmgrader-answer-key", "version": 1, "exam": "...", "instructions": "...",
+    {"format": "lmgrader-answer-key", "version": 2, "exam": "...", "instructions": "...",
      "questions": [{"label": "1", "stem": "Let $A=...$.",
-                    "parts": [{"label": "a", "text": "...", "points": 4, "answer": "...",
-                               "type": "open", "rubric": [{"points": 2, "criterion": "..."}],
+                    "parts": [{"label": "a", "text": "...", "points": 4, "answer": "...", "type": "open",
+                               "rubric": {"scoring": "positive",
+                                          "items": [{"points": 2, "description": "..."}]},
                                "notes": "..."}]},
                    {"label": "2", "text": "...", "points": 2, "type": "true_false", "answer": "False"}]}
+
+A rubric is {"max_points"?, "scoring": "positive" | "negative", "items": [{"points", "description"}]}
+(positive: start at 0, items add up to the points; negative: start at the points, items are
+deductions). Version 1 keys wrote the rubric as a list of {"points", "criterion"}: still read.
 """
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from ..models import TestTemplate
+from ..models import TestTemplate, Rubric, RubricItem, SCORING_NEGATIVE, SCORING_POSITIVE
 from .layout import parse_label
 
 FORMAT = "lmgrader-answer-key"
@@ -33,8 +38,9 @@ class KeyItem:
     points: Optional[float] = None
     answer: str = ""
     type: str = "open"
-    rubric: List[Tuple[float, str]] = field(default_factory=list)
+    rubric: List[Tuple[float, str]] = field(default_factory=list)   # (points, description) items
     notes: str = ""
+    scoring: str = SCORING_POSITIVE   # negative: start at the points, rubric items are deductions
 
 @dataclass
 class AnswerKey:
@@ -90,25 +96,37 @@ def _item(d: dict, label: str, stem: str = "") -> KeyItem:
            "multiplechoice": "multiple_choice"}.get(typ, typ)
     if typ not in TYPES:
         raise ValueError(f"{where}: unknown type {d.get('type')!r} (use one of {', '.join(TYPES)})")
+    raw = d.get("rubric") or []
+    scoring, rub_max = SCORING_POSITIVE, None
+    if isinstance(raw, dict):                 # version 2: {"scoring", "max_points", "items"}
+        s = str(raw.get("scoring") or SCORING_POSITIVE).strip().lower()
+        if s not in (SCORING_POSITIVE, SCORING_NEGATIVE):
+            raise ValueError(f"{where}: rubric scoring must be \"positive\" or \"negative\", got {s!r}")
+        scoring, rub_max = s, _num(raw.get("max_points"), f"{where} rubric max_points")
+        raw = raw.get("items") or []
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}: \"rubric\" must be an object with \"items\" (or a list of items)")
     rubric = []
-    for n, c in enumerate(d.get("rubric") or []):
+    for n, c in enumerate(raw):
         if isinstance(c, str):
-            m = re.match(r"\s*\[?\s*([\d.]+)\s*(?:pts?|points?)?\s*\]?\s*[:\-]?\s*(.+)", c)
+            m = re.match(r"\s*\[?\s*([+-]?[\d.]+)\s*(?:pts?|points?)?\s*\]?\s*[:\-]?\s*(.+)", c)
             if not m:
-                raise ValueError(f"{where}: rubric line {n + 1} needs points, e.g. '[2 pt] correct setup'")
+                raise ValueError(f"{where}: rubric item {n + 1} needs points, e.g. '[2 pt] correct setup'")
             rubric.append((float(m.group(1)), m.group(2).strip()))
             continue
-        pts = _num(c.get("points"), f"{where} rubric line {n + 1}")
-        desc = str(c.get("criterion") or c.get("description") or "").strip()
+        pts = _num(c.get("points"), f"{where} rubric item {n + 1}")
+        desc = str(c.get("description") or c.get("criterion") or "").strip()
         if pts is None or not desc:
-            raise ValueError(f"{where}: rubric line {n + 1} needs 'points' and 'criterion'")
+            raise ValueError(f"{where}: rubric item {n + 1} needs 'points' and 'description'")
         rubric.append((pts, desc))
     points = _num(d.get("points"), where)
-    if points is None and rubric:
-        points = sum(p for p, _ in rubric)
+    if points is None:
+        points = rub_max
+    if points is None and rubric and scoring == SCORING_POSITIVE:
+        points = sum(p for p, _ in rubric if p > 0)
     return KeyItem(label=label, text=str(d.get("text") or "").strip(), stem=stem, points=points,
                    answer=str(d.get("answer") or "").strip(), type=typ, rubric=rubric,
-                   notes=str(d.get("notes") or "").strip())
+                   notes=str(d.get("notes") or "").strip(), scoring=scoring)
 
 def parse_answer_key(data) -> AnswerKey:
     """dict (or JSON text) -> AnswerKey. Raises ValueError with a readable message."""
@@ -154,17 +172,23 @@ def match_key(label: str):
         return p
     return re.sub(r"[^a-z0-9]", "", label.lower())
 
-def key_rubric(it: KeyItem, points: float) -> str:
-    """Rubric text written straight from the key (same shape as llm.client.format_rubric), or ""
-    when the LLM still has to write it. True/false and multiple choice are all-or-nothing."""
-    from ..llm.client import format_rubric
+def key_rubric(it: KeyItem, points: float) -> Rubric:
+    """The rubric written straight from the key, or an empty Rubric when the LLM still has to
+    write it. True/false and multiple choice are all-or-nothing (one item worth every point)."""
     if it.rubric:
-        crit = [{"description": d, "points": p} for p, d in it.rubric]
+        items = [RubricItem(p, d) for p, d in it.rubric]
+        scoring = it.scoring
     elif it.type in ("true_false", "multiple_choice") and it.answer:
-        crit = [{"description": f"Answers {it.answer} (all or nothing: no partial credit)", "points": points}]
+        items = [RubricItem(points, f"Answers {it.answer} (all or nothing: no partial credit)")]
+        scoring = SCORING_POSITIVE
     else:
-        return ""
-    return format_rubric({"expected_answer": it.answer, "criteria": crit}, points)
+        return Rubric(max_points=points)
+    return Rubric(max_points=points, scoring=scoring, expected_answer=it.answer, items=items)
+
+def _same_rubric(a: Rubric, b: Rubric) -> bool:
+    """Equal content (item ids are new on every import)."""
+    key = lambda r: (r.scoring, r.expected_answer, [(it.points, it.description) for it in r.items])
+    return key(a) == key(b)
 
 def apply_answer_key(t: TestTemplate, key: AnswerKey, rubrics: bool = True,
                      replace: bool = False) -> ImportReport:
@@ -193,7 +217,7 @@ def apply_answer_key(t: TestTemplate, key: AnswerKey, rubrics: bool = True,
             continue
         used.add(k)
         rep.matched.append(r.problem)
-        old_text, old_rubric = r.question_text, r.rubric
+        old_text, old_rubric = r.question_text, r.rubric.copy()
         old_basis = (r.question_text, r.points, r.answer_key)   # what a rubric was written for
         if replace:
             r.grading_notes, r.answer_key = "", ""
@@ -201,19 +225,21 @@ def apply_answer_key(t: TestTemplate, key: AnswerKey, rubrics: bool = True,
             r.question_text = it.text
         if it.points is not None:
             r.points = it.points
+            r.rubric.max_points = it.points
         if it.answer:
             r.answer_key = it.answer
         if it.notes:
             r.grading_notes = it.notes
         if it.stem and isinstance(k, tuple) and k[1]:
             t.stems[str(k[0])] = it.stem
-        rub = key_rubric(it, r.points) if rubrics else ""
+        rub = key_rubric(it, r.points) if rubrics else Rubric(max_points=r.points)
         if rub:
-            r.rubric = rub
+            if not _same_rubric(rub, r.rubric):
+                r.rubric = rub     # an unchanged rubric keeps its item ids (hand grades use them)
             rep.rubrics_from_key.append(r.problem)
         elif (r.question_text, r.points, r.answer_key) != old_basis:
-            r.rubric = ""          # stale: written for other text/points/answer
-        if (old_text or old_rubric) and (old_text, old_rubric) != (r.question_text, r.rubric):
+            r.rubric = Rubric(max_points=r.points)    # stale: written for other text/points/answer
+        if (old_text or old_rubric) and (old_text != r.question_text or not _same_rubric(old_rubric, r.rubric)):
             rep.replaced.append(r.problem)
     rep.no_box = [it.label for it in key.items if match_key(it.label) not in used]
     return rep
@@ -225,11 +251,16 @@ def describe(key: AnswerKey) -> str:
         out.append(f"Instructions: {key.instructions[:80]}")
     for it in key.items:
         pts = f"{it.points:g} pt" if it.points is not None else "points not set"
-        rub = (f"rubric {len(it.rubric)} line(s), sum {sum(p for p, _ in it.rubric):g}" if it.rubric else
+        neg = it.scoring == SCORING_NEGATIVE
+        rub = ((f"deductions rubric {len(it.rubric)} item(s)" if neg else
+                f"rubric {len(it.rubric)} item(s), sum {sum(p for p, _ in it.rubric if p > 0):g}") if it.rubric else
                "all-or-nothing rubric" if it.type != "open" and it.answer else "rubric by LLM")
         warn = ""
-        if it.rubric and it.points is not None and abs(sum(p for p, _ in it.rubric) - it.points) > 1e-6:
+        if (it.rubric and not neg and it.points is not None
+                and abs(sum(p for p, _ in it.rubric if p > 0) - it.points) > 1e-6):
             warn = "  <- rubric points don't add up to the question's points"
+        if it.rubric and neg and any(p > 0 for p, _ in it.rubric):
+            warn = "  <- a deductions rubric should only have negative items"
         if not it.text:
             warn += "  <- no text"
         if not it.answer:

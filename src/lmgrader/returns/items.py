@@ -40,10 +40,10 @@ def split_name(name: str):
         return name, ""
     return " ".join(parts[:-1]), parts[-1]
 
-def collect_items(exam_name: str, include_needs_review: bool = True) -> List[ReturnItem]:
-    """Fully graded submissions of an exam (all versions)."""
-    versions = {t.id: t for t in list_versions(exam_name)}
-    students = {s.id: s for s in list_students()}
+def collect_items(exam_name: str, include_needs_review: bool = True, course_id: int = None) -> List[ReturnItem]:
+    """Fully graded submissions of an exam (all versions) of the current course (or course_id)."""
+    versions = {t.id: t for t in list_versions(exam_name, course_id)}
+    students = {s.id: s for s in list_students(all_courses=True)}
     items = []
     for sub in list_submissions(template_ids=list(versions)):
         if sub.status != SUB_GRADED:

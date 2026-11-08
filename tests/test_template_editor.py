@@ -98,9 +98,9 @@ def test_autosave_persists(editor, pages):
     assert len(saved.regions) == 1 and saved.regions[0].points == 7
     assert tv.lbl_saved.text() == "Saved ✓"
     # _confirm_discard (used by main_window.closeEvent) flushes immediately
-    tv.in_rubric.setPlainText("- [7 pt] all correct")
+    tv.rubric_editor.add_item(7, "all correct")
     assert tv._confirm_discard() is True and not tv.dirty
-    assert db.load_template(t.id).regions[0].rubric == "- [7 pt] all correct"
+    assert [(i.points, i.description) for i in db.load_template(t.id).regions[0].rubric.items] == [(7, "all correct")]
     # the next drawn box starts at 1 again (not the previous question's 7)
     tv.on_rect_drawn((100, 600, 300, 150))
     assert tv.t.regions[1].points == 1.0 and tv.in_points.value() == 1.0

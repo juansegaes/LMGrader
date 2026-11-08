@@ -34,6 +34,13 @@ class NameMatch:
 def normalize_id(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
+def roster_number(s: Student) -> str:
+    """The roster entry's student number, or "" when its student_id is a login such as
+    'jsmith2' (mostly letters): only numbers can be compared with a handwritten ID."""
+    raw = re.sub(r"\s", "", s.student_id or "")
+    digits = normalize_id(raw)
+    return digits if len(digits) >= 4 and len(digits) >= 0.6 * len(raw) else ""
+
 def fuzzy_candidates(name: str, students: List[Student], limit: int = 5) -> List[Tuple[Student, float]]:
     """Top roster matches by WRatio (handles reordering, initials, missing middle names)."""
     if not name.strip() or not students:
@@ -87,7 +94,7 @@ def match_student(llm, id_b64: Optional[str], name_b64: Optional[str], students:
     id_read = read_student_id(llm, id_b64) if id_b64 else ""
     by_id = {}
     for s in students:
-        sid = normalize_id(s.student_id)
+        sid = roster_number(s)
         if sid:
             by_id.setdefault(sid, []).append(s)
 
@@ -104,7 +111,7 @@ def match_student(llm, id_b64: Optional[str], name_b64: Optional[str], students:
 
     nm = match_name(llm, name_b64, students) if name_b64 else NameMatch(method="none")
     nm.id_read = id_read
-    if len(id_read) >= 4:
+    if len(id_read) >= 4 and by_id:   # a roster without numeric IDs can't confirm or contradict one
         near = [s for sid, ss in by_id.items() if len(sid) == len(id_read)
                 and Levenshtein.distance(sid, id_read) <= 1 for s in ss]
         if len(near) == 1 and name_score(nm.name_read, near[0]) >= ID_NAME_AGREE:
@@ -113,7 +120,7 @@ def match_student(llm, id_b64: Optional[str], name_b64: Optional[str], students:
         # ID read but on nobody's roster entry: trust a clear name match only if its ID is close
         # (a 2-digit misread); a far-off ID means ID and name disagree -> human confirms
         if nm.student is not None:
-            own = normalize_id(nm.student.student_id)
+            own = roster_number(nm.student)
             close = bool(own) and Levenshtein.distance(own, id_read) <= 2
             if not (nm.method == "fuzzy" and close):
                 nm.needs_confirm = True

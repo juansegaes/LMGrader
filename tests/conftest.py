@@ -48,6 +48,10 @@ _con.close()
 
 import numpy as np  # noqa: E402
 import cv2  # noqa: E402
+from lmgrader.config import LLM_CONFIG  # noqa: E402
+
+# "Use an LLM" as shipped (the test data dir has no settings.json, so this is the code default)
+SHIPPED_LLM_ENABLED = LLM_CONFIG["enabled"]
 
 class FakeLLM:
     """Stands in for LLMClient; records calls."""
@@ -84,6 +88,29 @@ def make_page(seed, text):
         cv2.putText(img, chr(rng.integers(65, 90)) * 3, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
     cv2.putText(img, text, (60, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 3)
     return img
+
+@pytest.fixture(autouse=True)
+def _no_trocr(request, monkeypatch):
+    """Tests read names with their fake LLMs only: the real TrOCR model (slow, ~1.3 GB) is off
+    unless a test is marked @pytest.mark.trocr."""
+    if request.node.get_closest_marker("trocr") is None:
+        from lmgrader.students import trocr
+        monkeypatch.setattr(trocr, "get_reader", lambda: None)
+
+@pytest.fixture(autouse=True)
+def _llm_on(monkeypatch):
+    """The LLM is off by default, but most tests drive the LLM paths with a fake LLM: turn
+    "Use an LLM" on (tests of the no-LLM mode set it back to False themselves)."""
+    monkeypatch.setitem(LLM_CONFIG, "enabled", True)
+
+@pytest.fixture(autouse=True)
+def _rubric_scoring_add_up(monkeypatch):
+    """Empty rubrics start with the scoring picked last (UI_CONFIG): every test starts from Add up."""
+    from lmgrader.config import UI_CONFIG
+    monkeypatch.setitem(UI_CONFIG, "rubric_scoring", "positive")
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "trocr: uses the real TrOCR handwriting model")
 
 @pytest.fixture(scope="session")
 def data_dir():

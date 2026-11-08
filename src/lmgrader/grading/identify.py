@@ -122,9 +122,11 @@ def field_crops(template: TestTemplate, scan_pages: List[str], first_aligned=Non
     return out[0], out[1]
 
 def read_student(llm, template: TestTemplate, scan_pages: List[str], students: List[Student],
-                 first_aligned=None, save_for=None) -> Optional[NameMatch]:
+                 first_aligned=None, save_for=None, ocr=None) -> Optional[NameMatch]:
     """Crop the name / ID fields, optionally cache the crops for submission `save_for`, and match
-    the roster (ID first, name as fallback). llm=None only saves the crops."""
+    the roster (ID first, name as fallback). The local handwriting reader `ocr` (TrOCR) goes
+    first; the LLM is only asked when that match is not sure. Without either, only the crops
+    are saved."""
     name_crop, id_crop = field_crops(template, scan_pages, first_aligned)
     if save_for is not None:
         n_path, i_path = crop_paths(save_for)
@@ -132,19 +134,35 @@ def read_student(llm, template: TestTemplate, scan_pages: List[str], students: L
             save_image(n_path, name_crop)
         if id_crop is not None:
             save_image(i_path, id_crop)
-    if llm is None or not students or (name_crop is None and id_crop is None):
+    if (llm is None and ocr is None) or not students or (name_crop is None and id_crop is None):
         return None
     b64 = lambda c: image_to_b64(prepare_crop(c)) if c is not None else None
-    return match_student(llm, b64(id_crop), b64(name_crop), students)
+    nm = None
+    if ocr is not None:
+        try:
+            nm = match_student(ocr, b64(id_crop), b64(name_crop), students)
+            nm.method = f"trocr {nm.method}"
+        except Exception:
+            nm = None
+        if nm is not None and nm.student is not None and not nm.needs_confirm:
+            return nm
+    if llm is not None:
+        try:
+            return match_student(llm, b64(id_crop), b64(name_crop), students)
+        except Exception:
+            if nm is None:
+                raise
+    return nm
 
 def read_student_name(llm, template: TestTemplate, scan_pages: List[str], students: List[Student]) -> Optional[NameMatch]:
     """Backwards-compatible wrapper."""
     return read_student(llm, template, scan_pages, students)
 
 def identify(scan_path, versions: List[TestTemplate], students: List[Student], llm=None,
-             save_crops_for=None, forced: Optional[TestTemplate] = None) -> Identification:
+             save_crops_for=None, forced: Optional[TestTemplate] = None, ocr=None) -> Identification:
     """scan_path: a single page path or the list of page paths of one test.
-    forced: the version a human picked (no detection, only alignment + name reading)."""
+    forced: the version a human picked (no detection, only alignment + name reading).
+    ocr: local handwriting reader (students.trocr), tried before the LLM for names / IDs."""
     pages = [scan_path] if isinstance(scan_path, str) else list(scan_path)
     scan = read_image(pages[0]) if pages else None
     if scan is None:
@@ -155,9 +173,9 @@ def identify(scan_path, versions: List[TestTemplate], students: List[Student], l
         ident = Identification(template=forced, aligned=aligned, inliers=inl, version_read="manual")
     else:
         ident = choose_version(scan, versions, pages, llm)
-    if ident.template is not None and (llm is not None or save_crops_for is not None):
+    if ident.template is not None and (llm is not None or ocr is not None or save_crops_for is not None):
         try:
-            ident.name = read_student(llm, ident.template, pages, students, ident.aligned, save_crops_for)
+            ident.name = read_student(llm, ident.template, pages, students, ident.aligned, save_crops_for, ocr)
         except Exception as e:
             ident.error = f"Name reading failed: {e}"
     return ident

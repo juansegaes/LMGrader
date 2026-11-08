@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 APP_NAME = "LMGrader"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.141592"    # TeX-style: each release gets closer to pi
 
 # Default LM Studio endpoint (OpenAI-compatible)
 DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"
@@ -13,6 +13,9 @@ DEFAULT_LLM_MODEL = "local-model"
 
 # Mutable runtime config (persisted to settings.json)
 LLM_CONFIG = {
+    # False = Settings → "Use an LLM" off: LMGrader never contacts any LLM (names: TrOCR only,
+    # grading by hand, questions/rubrics typed or imported). Off by default: tick it in Settings.
+    "enabled": False,
     "base_url": DEFAULT_LLM_BASE_URL,
     "api_key": DEFAULT_LLM_API_KEY,
     "model": DEFAULT_LLM_MODEL,
@@ -29,7 +32,53 @@ LLM_CONFIG = {
     "default_instructions": "",
     # grading strictness pre-set for new exams: 5 (very generous) .. 10 (strict)
     "default_strictness": 10,
+    # who grades answers: "local" (the server above) or "openrouter" (name reading, question and
+    # rubric generation always stay on the local server)
+    "grading_provider": "local",
+    "openrouter_model": "qwen/qwen3-vl-8b-instruct",
 }
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_ENABLED = False  # grading with OpenRouter is off for now: the local LLM (or none) grades; Settings hides the choice (the code stays)
+
+def llm_enabled() -> bool:
+    """Settings → "Use an LLM". Off: no LLM request is ever made."""
+    return bool(LLM_CONFIG.get("enabled", False))
+
+def _dotenv_files():
+    here = Path(__file__).resolve()
+    seen = []
+    for d in (Path.cwd(), here.parents[2], Path.home() / ".lmgrader"):
+        f = d / ".env"
+        if f not in seen:
+            seen.append(f)
+    return seen
+
+def load_dotenv():
+    """Read KEY=VALUE lines of the first .env found (cwd, project root, ~/.lmgrader) into os.environ
+    without overriding variables that are already set."""
+    for f in _dotenv_files():
+        if not f.is_file():
+            continue
+        try:
+            lines = f.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip().removeprefix("export ").strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            os.environ.setdefault(k, v)
+        return
+
+def openrouter_api_key() -> str:
+    load_dotenv()
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
 STRICTNESS_MIN, STRICTNESS_MAX = 5, 10
 
@@ -41,7 +90,16 @@ def clamp_strictness(level) -> int:
         return STRICTNESS_MAX
 
 # Appearance: "light" | "dark" | "system"
-UI_CONFIG = {"theme": "light"}
+# theme; course_id: the course the sidebar picker showed last (opened again at start);
+# rubric_scoring: the rubric scoring picked last ("positive" | "negative"), used by the next empty rubric
+UI_CONFIG = {"theme": "light", "course_id": None, "rubric_scoring": "positive"}
+
+# Reading handwritten names / student IDs. TrOCR (local, CPU) always reads first; the LLM is
+# only asked when TrOCR + fuzzy matching is not sure (and only if the LLM server answers).
+NAMES_CONFIG = {
+    "trocr_model": "microsoft/trocr-base-handwritten",
+    "llm_fallback": True,
+}
 
 # Phrases (regex, case-insensitive) in a transcription meaning "the work continues elsewhere".
 # Any match sends the question to a human, regardless of what the model says.
@@ -55,6 +113,7 @@ CONTINUATION_PATTERNS = [
 
 # Email (SMTP) for returning graded tests. The password is NEVER stored here: it lives in the
 # OS keyring (if the `keyring` package is installed) or only in memory for the session.
+EMAIL_ENABLED = False       # returning tests by email is off for now: the Return tab and Settings hide it (the code stays)
 SMTP_CONFIG = {
     "host": "smtp.gmail.com",
     "port": 465,
@@ -71,7 +130,8 @@ SMTP_CONFIG = {
 }
 
 # Canvas (feedback PDFs as submission comments). The access token is NEVER stored here (keyring or
-# session memory, like the SMTP password). targets: {exam name: {"course_id", "assignment_id"}}.
+# session memory, like the SMTP password). targets: {"<LMGrader course id>:<exam name>":
+# {"course_id", "assignment_id"}} (Canvas ids; keys saved before courses are the plain exam name).
 CANVAS_CONFIG = {
     "base_url": "",             # e.g. https://canvas.charlotte.edu
     "comment": "Your graded {exam} with feedback is attached.",
@@ -127,6 +187,7 @@ def load_settings():
             LLM_CONFIG.update(data.get("llm", {}))
             SMTP_CONFIG.update({k: v for k, v in data.get("smtp", {}).items() if k != "password"})
             UI_CONFIG.update(data.get("ui", {}))
+            NAMES_CONFIG.update(data.get("names", {}))
             CANVAS_CONFIG.update({k: v for k, v in data.get("canvas", {}).items() if k != "token"})
         else:  # legacy flat file (LLM settings only)
             LLM_CONFIG.update(data)
@@ -134,7 +195,7 @@ def load_settings():
 def save_settings():
     smtp = {k: v for k, v in SMTP_CONFIG.items() if k != "password"}
     canvas = {k: v for k, v in CANVAS_CONFIG.items() if k != "token"}
-    settings_path().write_text(json.dumps({"llm": LLM_CONFIG, "smtp": smtp, "ui": UI_CONFIG, "canvas": canvas},
-                                          indent=2), encoding="utf-8")
+    settings_path().write_text(json.dumps({"llm": LLM_CONFIG, "smtp": smtp, "ui": UI_CONFIG, "names": NAMES_CONFIG,
+                                           "canvas": canvas}, indent=2), encoding="utf-8")
 
 load_settings()
