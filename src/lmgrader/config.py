@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 APP_NAME = "LMGrader"
-APP_VERSION = "0.3.141592"    # TeX-style: each release gets closer to pi
+APP_VERSION = "0.5"    # TeX-style: each release gets closer to pi
 
 # Default LM Studio endpoint (OpenAI-compatible)
 DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"

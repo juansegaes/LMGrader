@@ -1,6 +1,6 @@
 [project]
 name = "lmgrader"
-version = "0.3.141592"
+version = "0.5"
 description = "FOSS local app for grading physical test templates"
 readme = "README.md"
 license = { text = "MIT" }

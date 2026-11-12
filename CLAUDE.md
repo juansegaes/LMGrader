@@ -13,7 +13,7 @@ after changes; UI changes get a screenshot in tests/screenshots/ that is checked
 ## Project: LMGrader
 FOSS local app for grading physical test templates (PyQt6 desktop app; useful with or without a
 local LLM in LM Studio).
-Current version: 0.3.141592 (pyproject.toml, config.APP_VERSION, lmgrader.__version__; the vX.Y
+Current version: 0.5 (pyproject.toml, config.APP_VERSION, lmgrader.__version__; the vX.Y
 headings in docs/DEVELOPER_NOTES.md are feature milestones, not release numbers).
 Tests: 302 offline passing (4 skipped: live LLM); live tests need LMGRADER_LIVE=1
 (+ LMGRADER_REAL_LIVE=1 for the private scans).
