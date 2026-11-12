@@ -189,7 +189,8 @@ or drag a box around several), then <b>New group from selection</b> or <b>Add se
 <b>Move selected to ungrouped</b> (they are graded one by one). <b>Groups are right → grade</b> goes on.</li>
 <li><b>4 Grade</b>: tick rubric items (keys {_k("1")}–{_k("9")}), add a comment if you like, then
 <b>Save &amp; next</b> ({_k("Ctrl+Enter")}). Groups come first, then single answers. When the
-question is done, the next one opens.</li>
+question is done, a message says so before anything else opens: <b>Go to</b> the next question or
+<b>Stay on</b> this one.</li>
 </ol>
 <ul>
 <li><b>Edit rubric…</b>: add or change rubric items while grading.</li>

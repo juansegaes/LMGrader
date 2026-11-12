@@ -69,7 +69,8 @@ first to avoid the large CUDA download: `pip install torch --index-url https://d
      shows every group with all its answers: click the ones that don't belong and *Move selected to
      ungrouped* (they are graded one by one), then *Groups are right*. Then check rubric items
      (keys 1-9) for each group and each remaining answer, Ctrl+Enter to save and go on; when the
-     question is done it opens the next one. *Suggest groups…* sorts scans added later.
+     question is done a message says so, then you go to the next one or stay on this one.
+     *Suggest groups…* sorts scans added later.
      *Regrade from scratch…* starts a question over with the same type, *Change question type…*
      with another one (either way its groups and hand grades are deleted, after asking).
    - **LLM Grade** – *Grade all ready*: the AI grades every question not graded by hand.

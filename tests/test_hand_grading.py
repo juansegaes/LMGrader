@@ -302,12 +302,32 @@ def test_hand_grade_view_blanks_group_grade(qapp, hexam, monkeypatch):
     v.in_comment.setPlainText("Well done")
     v.save_current()
     assert v.cur == ("answer", c)
+    told = _finished_message(monkeypatch)
     v.save_current()
+    assert "That was the last question" in told[0]
     graded = hand.hand_graded(t, 1)
     assert {s: g.score for s, g in graded.items()} == {a: 0, b: 2, c: 0}
     assert graded[b].comment == "Well done"
     assert "3/3 by hand" in v.cb_question.currentText()
     v.close()
+
+
+def _finished_message(monkeypatch, press=None, screenshot=None):
+    """Stands in for the user at the "question finished" message: returns the list of texts shown
+    and presses the button whose text starts with `press` (None = the first button)."""
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+    told = []
+
+    def answer(box):
+        told.append(box.text())
+        if screenshot:
+            from conftest import SCREENSHOT_DIR
+            box.show()
+            QApplication.processEvents()
+            box.grab().save(str(SCREENSHOT_DIR / screenshot))
+        next(b for b in box.buttons() if press is None or b.text().startswith(press)).click()
+    monkeypatch.setattr(QMessageBox, "exec", answer)
+    return told
 
 
 def _fresh_question(t, i):
@@ -574,18 +594,83 @@ def test_save_and_next_opens_the_next_question(qapp, hexam, monkeypatch):
     db.set_hand_stage(t.id, q1, "grade")
     asked = []
     monkeypatch.setattr(group_setup, "ask_kind", lambda *a, **k: asked.append(a[1]) or "blank")
+    told = _finished_message(monkeypatch, press="Go to", screenshot="hand_question_finished.png")
     v = HandGradeView()
     v.resize(1300, 850); v.show()
     _open(qapp, v, q1, PAGE_GRADE)
     assert len(v.queue) == 3
     for _ in range(3):
-        assert v.cb_question.currentData() == q1
+        assert v.cb_question.currentData() == q1 and told == []       # nothing said while answers are left
         v.save_current()
-    # Q1 is graded: Save & next opened Q2 (its category is asked the first time)
+    # Q1 is graded: the user is told, then Save & next opens Q2 (its category is asked the first time)
+    assert told == ["Every answer to Q1 is graded by hand.\n\nNext is Q2."]
     assert v.cb_question.currentData() == q2 and asked == ["Q2"]
     _wait(qapp, lambda: v.worker is None and v.stack.currentIndex() == PAGE_BLANKS)
     assert len(hand.hand_graded(t, 0)) == 3
     v.close()
+
+
+def test_question_finished_message_can_stay_on_the_question(qapp, hexam, monkeypatch):
+    from lmgrader.ui import group_setup
+    from lmgrader.ui.hand_grade_view import HandGradeView, PAGE_GRADE
+    t = db.load_template(hexam["tid"])
+    q1 = t.regions[0].uid
+    _fresh_question(t, 0)
+    db.set_hand_setup(t.id, q1, kind="blank")
+    db.set_hand_stage(t.id, q1, "grade")
+    asked = []
+    monkeypatch.setattr(group_setup, "ask_kind", lambda *a, **k: asked.append(a[1]) or "blank")
+    told = _finished_message(monkeypatch, press="Stay on Q1")
+    v = HandGradeView()
+    v.resize(1300, 850); v.show()
+    try:
+        _open(qapp, v, q1, PAGE_GRADE)
+        for _ in range(3):
+            v.save_current()
+        assert len(told) == 1 and asked == []
+        assert v.cb_question.currentData() == q1 and v.stack.currentIndex() == PAGE_GRADE
+        assert "3/3 by hand" in v.cb_question.currentText()
+    finally:
+        v.close()
+
+
+@pytest.mark.parametrize("key, modifier, stays", [("Key_Return", "NoModifier", False),
+                                                  ("Key_Return", "ControlModifier", False),
+                                                  ("Key_Escape", "NoModifier", True)])
+def test_question_finished_message_keys(qapp, hexam, monkeypatch, key, modifier, stays):
+    """The real modal message, answered from the keyboard."""
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    from lmgrader.ui import group_setup
+    from lmgrader.ui.hand_grade_view import HandGradeView, PAGE_GRADE
+    t = db.load_template(hexam["tid"])
+    q1, q2 = t.regions[0].uid, t.regions[1].uid
+    _fresh_question(t, 0)
+    _fresh_question(t, 1)
+    db.set_hand_setup(t.id, q1, kind="blank")
+    db.set_hand_stage(t.id, q1, "grade")
+    monkeypatch.setattr(group_setup, "ask_kind", lambda *a, **k: None)
+    v = HandGradeView()
+    v.resize(1300, 850); v.show()
+    left_open = []
+
+    def press():
+        box = QApplication.activeModalWidget()
+        QTest.keyClick(box.focusWidget(), getattr(Qt.Key, key), getattr(Qt.KeyboardModifier, modifier))
+        if box.isVisible():                 # never leave the test waiting on a modal box
+            left_open.append(box.text())
+            box.reject()
+    try:
+        _open(qapp, v, q1, PAGE_GRADE)
+        for _ in range(2):
+            v.save_current()
+        QTimer.singleShot(0, press)
+        v.save_current()
+        assert left_open == []
+        assert v.cb_question.currentData() == (q1 if stays else q2)
+    finally:
+        v.close()
 
 
 def test_change_question_type_starts_over(qapp, hexam, monkeypatch):

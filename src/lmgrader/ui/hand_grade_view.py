@@ -1338,17 +1338,32 @@ class HandGradeView(QWidget):
             self._next_question()
 
     def _next_question(self):
-        """Every answer to the open question is graded: Save & next opens the next question (its
-        category is asked the first time)."""
+        """Every answer to the open question is graded: say so before anything else opens, then
+        go to the next question (its category is asked the first time) unless the user stays."""
         done = self.region.problem
         i = self.cb_question.currentIndex()
+        graded = f"Every answer to {done} is graded by hand"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(f"{done} finished")
         if i + 1 >= self.cb_question.count():
-            self._status(f"Every answer to {done} is graded by hand. That was the last question.")
+            box.setText(f"{graded}.\n\nThat was the last question.")
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            self._status(f"{graded}. That was the last question.")
+            return
+        uid = self.cb_question.itemData(i + 1)
+        nxt = next((r.problem for r in self.t.regions if r.uid == uid), "the next question")
+        box.setText(f"{graded}.\n\nNext is {nxt}.")
+        go = box.addButton(f"Go to {nxt}", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(f"Stay on {done}", QMessageBox.ButtonRole.RejectRole)     # Esc too
+        box.setDefaultButton(go)
+        box.exec()
+        if box.clickedButton() is not go:
+            self._status(f"{graded}.")
             return
         self.cb_question.setCurrentIndex(i + 1)
-        uid = self.cb_question.currentData()
-        nxt = next((r.problem for r in self.t.regions if r.uid == uid), "the next question")
-        self._status(f"Every answer to {done} is graded by hand: on to {nxt}.")
+        self._status(f"{graded}: on to {nxt}.")
         self.cur = None
         self.open_question()
 
