@@ -1446,8 +1446,8 @@ class HandGradeView(QWidget):
         ed = RubricEditor()
         ed.set_rubric(r.rubric, r.points)
         lay.addWidget(ed, 1)
-        lay.addWidget(label("Answers you already graded keep their score; open them and save again to "
-                            "apply changed points.", "muted"))
+        lay.addWidget(label("Answers you already graded update to the new rubric, unless their score or "
+                            "feedback was changed in Review.", "muted"))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)

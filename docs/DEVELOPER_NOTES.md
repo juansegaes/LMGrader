@@ -68,8 +68,12 @@ live tests need LMGRADER_LIVE=1 (+ LMGRADER_REAL_LIVE=1 for the private scans).
   hand_group_members (a test is in at most one group per question). A hand grade = grades row with human_graded=1, source='hand',
   rubric_items_json, comment, hand_group_id; feedback = applied items + comment. Crops in
   hand_crops/ (key includes the rect); pages aligned on demand (db.set_aligned_page, column-only
-  writes). session.refresh_status: a ready test with every question graded becomes graded (and
-  back); confirm_student does the same.
+  writes). Saving a changed template rubric automatically recalculates existing hand grades from
+  their stored item ids and comment, including the score, feedback and max points; deleted rubric
+  items are ignored but their ids remain stored. Grades whose score or feedback no longer matches
+  the old rubric (for example, changed in Review) are preserved, as are grades when a nonempty
+  rubric is replaced with one that shares no item ids. AI grades are never changed. session.refresh_status:
+  a ready test with every question graded becomes graded (and back); confirm_student does the same.
 - Suggested groups (grading/autogroup.py, no LLM): saved as hand groups with auto_key ("blank",
   "choice:A+C", "text:x=2") and checked=0 (⚑ in the UI) until Looks right or the group is graded;
   answers already grouped or hand graded are never moved; a re-run adds new answers to the group
@@ -337,8 +341,6 @@ live tests need LMGRADER_LIVE=1 (+ LMGRADER_REAL_LIVE=1 for the private scans).
   theme.<NAME> (read at build/refresh time) or an objectName styled in the QSS.
 
 ## Future work
-- Hand grading: re-score hand grades automatically when a rubric item's points change (today:
-  open the answer/group and save again).
 
 ## Notes
 - Every LLM request (LLMClient._chat) is retried until it fails 3 times within 60 s (3 s between

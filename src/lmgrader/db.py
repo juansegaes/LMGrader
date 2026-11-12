@@ -3,7 +3,7 @@ import sqlite3
 import json
 from typing import List, Optional
 from .config import db_path
-from .models import Student, TestTemplate, Submission, Grade, region_to_dict, region_from_dict, new_uid
+from .models import Student, TestTemplate, Submission, Grade, Rubric, region_to_dict, region_from_dict, new_uid
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
@@ -386,6 +386,7 @@ def save_template(t: TestTemplate) -> int:
         row = c.execute("SELECT regions_json FROM templates WHERE id=?", (t.id,)).fetchone()
         if row is not None:
             _follow_regions(c, t.id, _region_uids(row["regions_json"]), [r.uid for r in t.regions])
+            _rescore_hand_grades(c, t.id, row["regions_json"], t.regions)
         c.execute("""UPDATE templates SET name=?,image_path=?,width=?,height=?,regions_json=?,
                      exam_name=?,version_label=?,name_rect_json=?,pages_json=?,name_page=?,
                      scan_layout_json=?,columns=?,id_rect_json=?,id_page=?,stems_json=?,
@@ -433,6 +434,38 @@ def _follow_regions(c, template_id: int, old: List[str], new: List[str]):
                   f"WHERE template_id=? AND region_uid IN ({q}))", (template_id, *removed))
         c.execute(f"DELETE FROM hand_groups WHERE template_id=? AND region_uid IN ({q})", (template_id, *removed))
         c.execute(f"DELETE FROM hand_questions WHERE template_id=? AND region_uid IN ({q})", (template_id, *removed))
+
+def _rescore_hand_grades(c, template_id: int, old_regions_json: str, new_regions: list):
+    """Recalculate hand grades for changed rubrics, except grades overridden in Review."""
+    old_regions = json.loads(old_regions_json or "[]")
+    old_by_uid = {uid: region for uid, region in zip(_region_uids(old_regions_json), old_regions)}
+    for new_index, region in enumerate(new_regions):
+        old_region = old_by_uid.get(region.uid)
+        if old_region is None:
+            continue
+        old_points = old_region.get("points", 0.0) or 0.0
+        old_rubric = Rubric.from_obj(old_region.get("rubric"), old_points)
+        if old_points == region.points and old_rubric.to_dict(old_points) == region.rubric.to_dict(region.points):
+            continue
+        old_item_ids = {item.id for item in old_rubric.items}
+        new_item_ids = {item.id for item in region.rubric.items}
+        if old_item_ids and not old_item_ids.intersection(new_item_ids):
+            continue
+        rows = c.execute(
+            "SELECT id, score, feedback, rubric_items_json, comment FROM grades "
+            "WHERE region_id=? AND source='hand' AND submission_id IN "
+            "(SELECT id FROM submissions WHERE template_id=?)",
+            (new_index, template_id)).fetchall()
+        for grade in rows:
+            items = json.loads(grade["rubric_items_json"] or "[]")
+            comment = grade["comment"] or ""
+            old_score = old_rubric.score(items, old_points)
+            old_feedback = old_rubric.feedback(items, comment)
+            if abs((grade["score"] or 0.0) - old_score) > 1e-6 or (grade["feedback"] or "") != old_feedback:
+                continue
+            c.execute("UPDATE grades SET score=?, feedback=?, max_points=? WHERE id=?",
+                      (region.rubric.score(items, region.points),
+                       region.rubric.feedback(items, comment), region.points, grade["id"]))
 
 def count_template_grades(template_id: int) -> int:
     """Graded answers (all questions) of the tests of a version."""

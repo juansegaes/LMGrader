@@ -1,4 +1,5 @@
 """Structured rubrics, question reordering, and hand grading by groups of answers."""
+import copy
 import time
 
 import pytest
@@ -94,6 +95,165 @@ def test_reordering_questions_moves_their_grades(hexam):
     assert {g.region_id: g.problem for g in db.list_grades(sid)} == {0: "Q1", 1: "Q2"}
     assert [r.problem for r in db.load_template(tid).regions] == ["Q1", "Q2"]
     db.delete_grades(sid)
+
+
+def _new_hand_case(hexam):
+    template = copy.deepcopy(db.load_template(hexam["tid"]))
+    template.id = None
+    template.name = "Hand quiz isolated"
+    template.version_label = "test"
+    tid = persist(template)
+    template = db.load_template(tid)
+    sub = Submission(exam_name=template.exam_name, template_id=tid, status=SUB_READY,
+                     scan_pages=[], name_confirmed=True)
+    return template, db.add_submission(sub)
+
+
+def test_changed_rubric_points_and_question_max_recalculate_hand_grades(hexam):
+    t, sid = _new_hand_case(hexam)
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, sid, [first.id])
+
+    t.regions[0].points = 3
+    t.regions[0].rubric.items[0].points = 5
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert grade.score == 3 and grade.feedback == "+5  factors"
+    assert grade.max_points == 3
+
+
+def test_changing_positive_rubric_to_negative_rescores_hand_grade(hexam):
+    t, sid = _new_hand_case(hexam)
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, sid, [first.id])
+
+    t.regions[0].rubric.scoring = SCORING_NEGATIVE
+    first.points = -1
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert grade.score == 3 and grade.feedback == "-1  factors"
+
+
+def test_deleting_rubric_item_updates_grade_but_keeps_saved_item_id(hexam):
+    t, sid = _new_hand_case(hexam)
+    items = [item.id for item in t.regions[0].rubric.items]
+    hand.save_hand_grade(t, 0, sid, items, "Show your work.")
+
+    t.regions[0].rubric.items.pop()
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert grade.score == 2 and grade.feedback == "+2  factors\nShow your work."
+    assert grade.rubric_items == items
+
+
+def test_changing_only_rubric_description_updates_feedback(hexam):
+    t, sid = _new_hand_case(hexam)
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, sid, [first.id])
+
+    first.description = "factoring correctly"
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert grade.score == 2 and grade.feedback == "+2  factoring correctly"
+
+
+def test_review_score_or_feedback_overrides_are_preserved_on_rubric_change(hexam):
+    t, score_sid = _new_hand_case(hexam)
+    feedback_sid = db.add_submission(Submission(exam_name=t.exam_name, template_id=t.id,
+                                                 status=SUB_READY, scan_pages=[], name_confirmed=True))
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, score_sid, [first.id])
+    hand.save_hand_grade(t, 0, feedback_sid, [first.id])
+
+    reviewed_score = db.get_grade(score_sid, 0)
+    reviewed_score.score = 1.5
+    db.save_grade(reviewed_score)
+    reviewed_feedback = db.get_grade(feedback_sid, 0)
+    reviewed_feedback.feedback = "Reviewed feedback"
+    db.save_grade(reviewed_feedback)
+
+    first.points = 3
+    first.description = "updated criterion"
+    persist(t)
+
+    score_grade = db.get_grade(score_sid, 0)
+    feedback_grade = db.get_grade(feedback_sid, 0)
+    assert score_grade.source == "hand" and score_grade.score == 1.5
+    assert score_grade.feedback == "+2  factors"
+    assert feedback_grade.source == "hand" and feedback_grade.score == 2
+    assert feedback_grade.feedback == "Reviewed feedback"
+
+
+def test_ai_grade_is_untouched_by_rubric_change(hexam):
+    from lmgrader.models import Grade
+    t, sid = _new_hand_case(hexam)
+    db.save_grade(Grade(submission_id=sid, region_id=0, problem="Q1", score=1.5, max_points=4,
+                        feedback="AI feedback", source=""))
+
+    t.regions[0].rubric.items[0].points = 3
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert (grade.source, grade.score, grade.max_points, grade.feedback) == ("", 1.5, 4, "AI feedback")
+
+
+def test_replacing_rubric_with_new_item_ids_preserves_hand_grade(hexam):
+    t, sid = _new_hand_case(hexam)
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, sid, [first.id])
+    old_grade = db.get_grade(sid, 0)
+
+    t.regions[0].rubric = Rubric(max_points=4, items=[RubricItem(4, "replacement")])
+    persist(t)
+
+    grade = db.get_grade(sid, 0)
+    assert (grade.score, grade.max_points, grade.feedback, grade.rubric_items) == (
+        old_grade.score, old_grade.max_points, old_grade.feedback, old_grade.rubric_items)
+
+
+def test_reordered_question_rubric_change_updates_its_remapped_grades(hexam):
+    t, sid = _new_hand_case(hexam)
+    q1_id = t.regions[0].rubric.items[0].id
+    q2_id = t.regions[1].rubric.items[0].id
+    hand.save_hand_grade(t, 0, sid, [q1_id])
+    hand.save_hand_grade(t, 1, sid, [q2_id])
+
+    q1, q2 = t.regions
+    q1.rubric.items[0].points = 3
+    t.regions = [q2, q1]
+    persist(t)
+
+    q1_grade = db.get_grade(sid, 1)
+    q2_grade = db.get_grade(sid, 0)
+    assert q1_grade.score == 3 and q1_grade.feedback == "+3  factors"
+    assert q2_grade.score == 2 and q2_grade.feedback == "+2  all correct"
+
+
+def test_rubric_change_does_not_rescore_another_versions_grades(hexam):
+    t, sid = _new_hand_case(hexam)
+    other = copy.deepcopy(t)
+    other.id = None
+    other.name = "Hand quiz other version"
+    other.version_label = "other"
+    other = db.load_template(persist(other))
+    other_sid = db.add_submission(Submission(exam_name=other.exam_name, template_id=other.id,
+                                             status=SUB_READY, scan_pages=[], name_confirmed=True))
+    first = t.regions[0].rubric.items[0]
+    hand.save_hand_grade(t, 0, sid, [first.id])
+    other_first = other.regions[0].rubric.items[0]
+    hand.save_hand_grade(other, 0, other_sid, [other_first.id])
+
+    t.regions[0].rubric.items[0].points = 3
+    persist(t)
+
+    assert db.get_grade(sid, 0).score == 3
+    other_grade = db.get_grade(other_sid, 0)
+    assert other_grade.score == 2 and other_grade.max_points == 4
+    assert other_grade.feedback == "+2  factors"
 
 
 def test_hand_grading_groups_and_individual_answers(hexam):
