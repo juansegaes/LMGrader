@@ -4,7 +4,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
                              QStackedWidget, QPushButton, QApplication, QComboBox, QMessageBox)
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtSvgWidgets import QSvgWidget
 
 from ..config import APP_VERSION, UI_CONFIG, save_settings, llm_enabled
@@ -28,6 +28,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LMGrader")
+        icon = QIcon(str(Path(__file__).parent / "assets" / "lmgrader-icon.svg"))
+        self.setWindowIcon(icon)
         self.resize(1400, 880)
         self.setMinimumSize(1100, 700)
         # gradings cut off by a crash / power loss go back to "ready"; saved questions are kept

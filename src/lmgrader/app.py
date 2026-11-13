@@ -40,6 +40,7 @@ def create_app():
     app.wheel_guard = NoWheelOnEntries(app)  # keep reference
     app.installEventFilter(app.wheel_guard)
     w = MainWindow()
+    app.setWindowIcon(w.windowIcon())
     w.show()
     app.main_window = w  # keep reference
     return app

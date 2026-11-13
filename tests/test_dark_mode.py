@@ -10,6 +10,7 @@ def test_dark_mode_toggle_and_persist(qapp, world):
     from lmgrader.ui.main_window import MainWindow
     mw = MainWindow(); mw.resize(1400, 880); mw.show(); qapp.processEvents()
     try:
+        assert not mw.windowIcon().isNull()
         assert theme.mode == "light" and "Dark mode" in mw.btn_theme.text()
         assert mw.brand_logo.property("source") == "lmgrader-logo-light.svg"
         assert mw.brand_logo.renderer().isValid()

@@ -341,6 +341,8 @@ live tests need LMGRADER_LIVE=1 (+ LMGRADER_REAL_LIVE=1 for the private scans).
   theme.<NAME> (read at build/refresh time) or an objectName styled in the QSS. The sidebar logo
   switches between the packaged light/dark SVGs whenever set_theme() applies the resolved mode;
   the README uses the same SVGs in a theme-aware <picture>.
+- App/window icon: ui/assets/lmgrader-icon.svg is set on both the main window and QApplication.
+  The Windows release build uses the matching ui/assets/lmgrader-icon.ico for its executable icon.
 
 ## Future work
 

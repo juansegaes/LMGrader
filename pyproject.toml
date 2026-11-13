@@ -1,6 +1,6 @@
 [project]
 name = "lmgrader"
-version = "0.5"
+version = "0.5.1"
 description = "FOSS local app for grading physical test templates"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,7 +37,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lmgrader = ["ui/assets/*.svg", "assets/answer_key_skill/*.md", "assets/*.npz"]
+lmgrader = ["ui/assets/*.svg", "ui/assets/*.ico", "assets/answer_key_skill/*.md", "assets/*.npz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
