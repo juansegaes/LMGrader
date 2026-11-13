@@ -356,7 +356,8 @@ live tests need LMGRADER_LIVE=1 (+ LMGRADER_REAL_LIVE=1 for the private scans).
   tests/test_help.py); it follows the tabs while open. Topics: Getting started, one per tab (Settings ends with a short "Connect LM Studio" how-to),
   Keyboard shortcuts (Review's from review_view.KEYS_*). help_html(key, llm_on): with "Use an
   LLM" off there is no LLM Grade topic and no AI/question-area instructions. Keep the texts in
-  step with the UI (button names exactly as on screen) and the README Workflow.
+  step with the UI (button names exactly as on screen) and docs/user-guide.md (the user docs: README =
+  overview, docs/install.md, docs/user-guide.md, docs/privacy.md).
 - DB stored in ~/.lmgrader/lmgrader.db (override with LMGRADER_DATA).
 - Data dir subfolders: templates/, scans/, aligned/, extracted/, name_crops/, returns/.
 - Image I/O uses imdecode/imencode so non-ASCII Windows paths work.

@@ -30,4 +30,13 @@ venv/
 Blank_cnn/
 dummy_test.md
 src/lmgrader/tests/
-tabertcaelan.pdf
+
+# local-only: agent instructions, editor/agent configs, dev tools (e.g. dev/make_screenshots.py)
+AGENTS.md
+CLAUDE.md
+opencode.json
+.claude/
+/dev/
+
+# release binaries (attached to GitHub releases, never committed)
+*.exe
