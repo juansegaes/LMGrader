@@ -1,55 +1,59 @@
 # Installing LMGrader
 
-- [Windows: download and run](#windows-download-and-run) (no Python needed)
-- [From source](#from-source) (Windows or Linux)
+- [Install with Python](#install-with-python) (Windows or Linux)
 - [Connect an AI (optional)](#connect-an-ai-optional)
 - [Scanning](#scanning)
 - [Where your data is](#where-your-data-is)
 
-## Windows: download and run
-1. Download `LMGrader-<version>-windows-x64.zip` from
-   [Releases](https://github.com/juansegaes/LMGrader/releases/latest).
-2. Unzip it where you keep programs, e.g. `Documents\LMGrader`. Keep the folder together:
-   `LMGrader.exe` needs the `_internal` folder next to it.
-3. Run `LMGrader.exe`. You can pin it to Start or to the taskbar.
+## Install with Python
+Install Python 3.10 or newer and Git, then clone the repository. Use a virtual environment to
+keep LMGrader's packages separate from other Python projects.
 
-Windows may show *Windows protected your PC* the first time, because the app isn't code-signed.
-Click *More info*, then *Run anyway*.
+### Windows (PowerShell)
+```powershell
+git clone https://github.com/juansegaes/LMGrader.git
+cd LMGrader
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install .
+python -m lmgrader
+```
 
-It needs 64-bit Windows 10 or 11. The download is about 310 MB (800 MB unzipped).
+If PowerShell prevents environment activation, allow it for the current terminal with
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then activate the environment again.
 
-**Updating:** delete the old `LMGrader` folder and unzip the new one. Your exams, rosters and
-grades are kept in your user folder ([below](#where-your-data-is)), not in the app folder, so they
-stay.
+### Linux
+```sh
+git clone https://github.com/juansegaes/LMGrader.git
+cd LMGrader
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install .
+python -m lmgrader
+```
 
-**Uninstalling:** delete the `LMGrader` folder. To remove your data too, also delete
-`%USERPROFILE%\.lmgrader` (export or back up the grades first) and the handwriting model in
-`%USERPROFILE%\.cache\huggingface\hub\models--microsoft--trocr-base-handwritten`.
+Installing the CPU-only PyTorch build first avoids downloading CUDA packages on Linux. On either
+platform, run `python -m lmgrader` from the cloned project folder with its virtual environment
+activated.
+
+Optional packages:
+- `pip install keyring`: lets LMGrader remember the Canvas token in the system keyring.
+- `pip install pywin32`: scanning from WIA scanners on Windows.
+- `python-sane`: scanning with SANE on Linux.
+
+To update, pull the latest changes in the cloned repository and run `python -m pip install .` again
+from its activated virtual environment. To uninstall, run `python -m pip uninstall lmgrader`
+from that environment and remove the cloned repository and `.venv` folder. Your exams and grades
+are stored separately ([below](#where-your-data-is)).
 
 ### The handwriting model
 The first time names are read (**Read names** in Scan & Names) or short answers are grouped in
 Hand Grade, LMGrader downloads its handwriting reader (TrOCR, about 1.3 GB) from Hugging Face.
 That takes a few minutes, once. After that, everything is read offline. The download sends no
 student data.
-
-## From source
-Python 3.10 or newer, on Windows or Linux.
-
-```
-git clone https://github.com/juansegaes/LMGrader.git
-cd LMGrader
-pip install -e .
-python -m lmgrader
-```
-
-This installs PyTorch (CPU) for the handwriting reader. On Linux, install the CPU build first to
-avoid the large CUDA download:
-`pip install torch --index-url https://download.pytorch.org/whl/cpu`.
-
-Optional packages (the Windows download includes the first two):
-- `pip install keyring`: lets LMGrader remember the Canvas token in the system keyring.
-- `pip install pywin32`: scanning from WIA scanners on Windows.
-- `python-sane`: scanning with SANE on Linux.
 
 ## Connect an AI (optional)
 LMGrader is useful without an AI: names are read on your computer and you grade in Hand Grade.

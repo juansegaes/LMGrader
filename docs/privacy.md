@@ -49,8 +49,8 @@ Every LLM request is limited to the smallest crop of the page it needs:
   `LMGRADER_DATA` environment variable). Nothing is uploaded to an LMGrader server; there isn't
   one.
 - The Canvas access token (and the SMTP password) are never written to disk in plain text. They
-  live in the OS keyring (Windows Credential Manager in the Windows build; from source, if the
-  `keyring` package is installed) or only in memory until LMGrader closes.
+  live in the OS keyring (including Windows Credential Manager when the `keyring` package is
+  installed) or only in memory until LMGrader closes.
 - Secure the computer as you would any device that holds grades: an account password,
   full-disk encryption (BitLocker / FileVault), and backups kept in institution-approved storage.
 

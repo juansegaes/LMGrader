@@ -13,8 +13,7 @@ you grade each one once. If you want, an AI running on your own computer grades 
 tells you what it isn't sure of. Every student gets a feedback PDF with red marks on their own
 pages.
 
-**[Download for Windows](https://github.com/juansegaes/LMGrader/releases/latest)** ·
-[Install](docs/install.md) · [User guide](docs/user-guide.md) ·
+**[Install with Python](docs/install.md)** · [User guide](docs/user-guide.md) ·
 [Privacy & FERPA](docs/privacy.md)
 
 ![Review: a test with an AI grade the model was unsure about, waiting for the teacher](docs/screenshots/review.png)
@@ -54,22 +53,16 @@ that belong to nobody; student IDs and answers are made up too.
 Every tab, with more screenshots: the [User guide](docs/user-guide.md).
 
 ## Get started
-**Windows:** download the zip from
-[Releases](https://github.com/juansegaes/LMGrader/releases/latest), unzip it and run
-`LMGrader.exe` in the `LMGrader` folder. No Python needed.
-
-**From source** (Windows or Linux, Python 3.10+):
-```
-pip install -e .
-python -m lmgrader
-```
+Install with Python 3.10 or newer on Windows or Linux. The
+[installation guide](docs/install.md) walks through setting up a virtual environment and running
+LMGrader.
 
 Then work down the sidebar: pick the **course**, set up the exam in **Exams & Templates**, import
 the roster in **Students**, add the scans in **Scan & Names**, grade in **Hand Grade** (and
 **LLM Grade**), check in **Review**, and give the tests back in **Return**. Press **F1** in the app
 for help on any tab.
 
-More: [Install](docs/install.md) (the Windows build, LM Studio, scanning, where your data is) and
+More: [Install](docs/install.md) (Python setup, LM Studio, scanning, where your data is) and
 the [User guide](docs/user-guide.md) (every tab, step by step, with keyboard shortcuts).
 
 ## Privacy
