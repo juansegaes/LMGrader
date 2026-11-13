@@ -1,8 +1,11 @@
 """Main window: sidebar navigation + stacked pages."""
+from pathlib import Path
+
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
                              QStackedWidget, QPushButton, QApplication, QComboBox, QMessageBox)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtSvgWidgets import QSvgWidget
 
 from ..config import APP_VERSION, UI_CONFIG, save_settings, llm_enabled
 from ..db import list_courses, current_course, set_current_course, course_name
@@ -18,6 +21,8 @@ from .review_view import ReviewView
 from .return_view import ReturnView
 from .settings_view import SettingsView
 from .help_view import HelpDialog
+
+_LOGO_SIZE = QSize(174, 41)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -49,7 +54,12 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(210)
         sl = QVBoxLayout(sidebar)
         sl.setContentsMargins(0, 0, 0, 12)
-        sl.addWidget(label("LMGrader", "brand"))
+        sl.addSpacing(15)
+        self.brand_logo = QSvgWidget()
+        self.brand_logo.setObjectName("brandLogo")
+        self.brand_logo.setFixedSize(_LOGO_SIZE)
+        sl.addWidget(self.brand_logo, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._set_brand_logo()
         sl.addWidget(label("Local exam grading", "brandSub"))
         # the course every tab works in (its roster and exams)
         sl.addWidget(label("COURSE", "courseLabel"))
@@ -178,11 +188,20 @@ class MainWindow(QMainWindow):
         self.btn_theme.setText("☀  Light mode" if theme.mode == "dark" else "☾  Dark mode")
         self.btn_theme.setToolTip("Switch the colors of LMGrader (also in Settings → Appearance)")
 
+    def _set_brand_logo(self):
+        logo = "lmgrader-logo-dark.svg" if theme.mode == "dark" else "lmgrader-logo-light.svg"
+        logo_path = Path(__file__).parent / "assets" / logo
+        self.brand_logo.load(str(logo_path))
+        if not self.brand_logo.renderer().isValid():
+            raise RuntimeError(f"Could not load LMGrader logo: {logo_path}")
+        self.brand_logo.setProperty("source", logo)
+
     def set_theme(self, choice: str):
         """Switch light/dark/system now and remember it."""
         UI_CONFIG["theme"] = choice
         save_settings()
         theme.apply_theme(QApplication.instance(), choice)
+        self._set_brand_logo()
         self._theme_label()
         self.settings_view.sync_theme()
         # views with inline colors (status text, warnings, step labels) rebuild them

@@ -11,8 +11,12 @@ def test_dark_mode_toggle_and_persist(qapp, world):
     mw = MainWindow(); mw.resize(1400, 880); mw.show(); qapp.processEvents()
     try:
         assert theme.mode == "light" and "Dark mode" in mw.btn_theme.text()
+        assert mw.brand_logo.property("source") == "lmgrader-logo-light.svg"
+        assert mw.brand_logo.renderer().isValid()
         mw.btn_theme.click(); qapp.processEvents()
         assert theme.mode == "dark" and theme.BG == theme.DARK["BG"] and "Light mode" in mw.btn_theme.text()
+        assert mw.brand_logo.property("source") == "lmgrader-logo-dark.svg"
+        assert mw.brand_logo.renderer().isValid()
         assert qapp.palette().color(QPalette.ColorRole.Window).name() == theme.DARK["BG"]
         assert theme.DARK["SURFACE"] in qapp.styleSheet()
         saved = json.loads(config.settings_path().read_text(encoding="utf-8"))
@@ -30,6 +34,7 @@ def test_dark_mode_toggle_and_persist(qapp, world):
         s.in_theme.setCurrentIndex(s.in_theme.findData("light"))
         s._theme_chosen(s.in_theme.currentIndex()); qapp.processEvents()
         assert theme.mode == "light" and "Dark mode" in mw.btn_theme.text()
+        assert mw.brand_logo.property("source") == "lmgrader-logo-light.svg"
         assert theme.resolve_mode("system") in ("light", "dark")
     finally:
         config.UI_CONFIG["theme"] = "light"

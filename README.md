@@ -1,6 +1,9 @@
 # LMGrader
 
-![LMGrader logo](docs/lmgrader-logo.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="src/lmgrader/ui/assets/lmgrader-logo-dark.svg">
+  <img alt="LMGrader" src="src/lmgrader/ui/assets/lmgrader-logo-light.svg">
+</picture>
 
 **Grade paper exams faster, and keep every student's work on your own computer.**
 

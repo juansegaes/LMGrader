@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="title">
+  <title id="title">LMGrader app icon</title>
+  <g transform="translate(20 16) scale(1.05)">
+    <path d="M38 5h94l42 42v133a18 18 0 0 1-18 18H38a18 18 0 0 1-18-18V23A18 18 0 0 1 38 5Z"
+          fill="#fff" stroke="#4f46e5" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M132 7v29a12 12 0 0 0 12 12h28" fill="#eef2ff" stroke="#4f46e5" stroke-width="6"
+          stroke-linejoin="round"/>
+    <circle cx="53" cy="79" r="11" fill="none" stroke="#1e2235" stroke-width="7"/>
+    <path d="M78 79h62" stroke="#1e2235" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="53" cy="119" r="13" fill="#16a34a"/>
+    <path d="m47 119 5 5 9-11" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"
+          stroke-linejoin="round"/>
+    <path d="M78 119h62" stroke="#1e2235" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="53" cy="159" r="11" fill="none" stroke="#1e2235" stroke-width="7"/>
+    <path d="M78 159h45" stroke="#1e2235" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -338,7 +338,9 @@ live tests need LMGRADER_LIVE=1 (+ LMGRADER_REAL_LIVE=1 for the private scans).
 - Light/dark mode: sidebar toggle + Settings → Appearance (Light / Dark / Follow Windows), saved as
   settings.json "ui.theme". theme.LIGHT / theme.DARK color sets; apply_theme() rewrites the module
   colors (theme.ACCENT, ...), palette and QSS at runtime. Never hard-code colors in views: use
-  theme.<NAME> (read at build/refresh time) or an objectName styled in the QSS.
+  theme.<NAME> (read at build/refresh time) or an objectName styled in the QSS. The sidebar logo
+  switches between the packaged light/dark SVGs whenever set_theme() applies the resolved mode;
+  the README uses the same SVGs in a theme-aware <picture>.
 
 ## Future work
 
